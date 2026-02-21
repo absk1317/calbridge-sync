@@ -135,6 +135,41 @@ Long-running daemon:
 npm run dev -- start
 ```
 
+## Cleanup duplicate synced events
+
+If migration or source changes created duplicate mirrored entries, use the built-in cleanup command.
+
+Preview first (no changes):
+
+```bash
+npm run dev -- cleanup:managed --dry-run
+```
+
+Delete all app-managed sync events from resolved target calendars and reset local sync mappings/state:
+
+```bash
+npm run dev -- cleanup:managed --yes
+```
+
+Target specific subscriptions only:
+
+```bash
+npm run dev -- cleanup:managed --subscription work-ics --dry-run
+npm run dev -- cleanup:managed --subscription work-ics --yes
+```
+
+Target specific calendar ids:
+
+```bash
+npm run dev -- cleanup:managed --calendar your_calendar_id@group.calendar.google.com --yes
+```
+
+After cleanup, run one sync cycle again:
+
+```bash
+npm run dev -- once
+```
+
 Build and run compiled output:
 
 ```bash

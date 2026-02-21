@@ -382,6 +382,12 @@ export class DbClient {
     stmt.run(subscriptionId, sourceEventId);
   }
 
+  deleteAllMappings(subscriptionId: string): number {
+    const stmt = this.db.prepare(`DELETE FROM event_mappings WHERE subscription_id = ?`);
+    const result = stmt.run(subscriptionId);
+    return result.changes;
+  }
+
   setState(subscriptionId: string, key: string, value: string) {
     const stmt = this.db.prepare(`
       INSERT INTO sync_state (subscription_id, key, value)
@@ -399,5 +405,11 @@ export class DbClient {
     `);
     const row = stmt.get(subscriptionId, key) as { value: string } | undefined;
     return row?.value;
+  }
+
+  deleteAllState(subscriptionId: string): number {
+    const stmt = this.db.prepare(`DELETE FROM sync_state WHERE subscription_id = ?`);
+    const result = stmt.run(subscriptionId);
+    return result.changes;
   }
 }

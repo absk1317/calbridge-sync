@@ -26,10 +26,18 @@ export interface GoogleEventInput {
 export interface GoogleEvent {
   id: string;
   etag?: string;
+  extendedProperties?: {
+    private?: Record<string, string>;
+  };
 }
 
 interface GoogleCalendar {
   id: string;
+}
+
+interface GoogleEventListPage {
+  items?: GoogleEvent[];
+  nextPageToken?: string;
 }
 
 export class GoogleCalendarClient {
@@ -75,6 +83,42 @@ export class GoogleCalendarClient {
     const encodedCalendarId = encodeURIComponent(calendarId);
     const url = `https://www.googleapis.com/calendar/v3/calendars/${encodedCalendarId}`;
     await this.request<GoogleCalendar>(url, "GET", undefined, "google_health");
+  }
+
+  async listEventsByPrivateExtendedProperties(
+    calendarId: string,
+    filters: Record<string, string>,
+  ): Promise<GoogleEvent[]> {
+    const encodedCalendarId = encodeURIComponent(calendarId);
+    const results: GoogleEvent[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const url = new URL(
+        `https://www.googleapis.com/calendar/v3/calendars/${encodedCalendarId}/events`,
+      );
+      url.searchParams.set("maxResults", "2500");
+      url.searchParams.set("showDeleted", "false");
+      url.searchParams.set("singleEvents", "false");
+      url.searchParams.set("fields", "items(id,etag,extendedProperties),nextPageToken");
+      if (pageToken) {
+        url.searchParams.set("pageToken", pageToken);
+      }
+      for (const [key, value] of Object.entries(filters)) {
+        url.searchParams.append("privateExtendedProperty", `${key}=${value}`);
+      }
+
+      const page = await this.request<GoogleEventListPage>(
+        url.toString(),
+        "GET",
+        undefined,
+        "google_list_events_by_private_extended_properties",
+      );
+      results.push(...(page.items ?? []));
+      pageToken = page.nextPageToken;
+    } while (pageToken);
+
+    return results;
   }
 
   private async request<T>(

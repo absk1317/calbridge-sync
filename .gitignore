@@ -8,3 +8,4 @@ coverage/
 .vscode/
 .DS_Store
 logs/
+subscriptions.json

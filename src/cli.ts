@@ -200,6 +200,13 @@ function chooseMicrosoftSubscription(
   );
 }
 
+function parseCsvList(values: string[]): string[] {
+  return values
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
 const program = new Command();
 program.name("sync-daemon").description("Outlook to Google calendar sync daemon").version("0.2.0");
 
@@ -360,6 +367,130 @@ program
       });
     });
   });
+
+program
+  .command("cleanup:managed")
+  .description("Delete app-managed events from target calendar(s) and reset local sync state")
+  .option(
+    "-s, --subscription <ids...>",
+    "subscription id(s); defaults to all enabled subscriptions",
+  )
+  .option("-c, --calendar <ids...>", "target calendar id(s); defaults from selected subscriptions")
+  .option("--dry-run", "show what would be deleted without mutating data", false)
+  .option("--yes", "confirm destructive cleanup", false)
+  .action(
+    async (options: {
+      subscription?: string[];
+      calendar?: string[];
+      dryRun: boolean;
+      yes: boolean;
+    }) => {
+      await withRuntime(async ({ config, db, googleClient, subscriptions, tokenStore }) => {
+        tokenStore.get("google", GOOGLE_TOKEN_KEY);
+
+        const requestedSubscriptionIds = parseCsvList(options.subscription ?? []);
+        const selectedSubscriptions =
+          requestedSubscriptionIds.length > 0
+            ? subscriptions.filter((subscriptionRuntime) =>
+                requestedSubscriptionIds.includes(subscriptionRuntime.subscription.id),
+              )
+            : subscriptions;
+
+        if (selectedSubscriptions.length === 0) {
+          throw new Error("No matching subscriptions selected for cleanup.");
+        }
+
+        if (requestedSubscriptionIds.length > 0) {
+          const selectedIds = new Set(selectedSubscriptions.map((s) => s.subscription.id));
+          const missing = requestedSubscriptionIds.filter((id) => !selectedIds.has(id));
+          if (missing.length > 0) {
+            throw new Error(`Unknown subscription id(s): ${missing.join(", ")}`);
+          }
+        }
+
+        const requestedCalendars = parseCsvList(options.calendar ?? []);
+        const derivedCalendars = selectedSubscriptions.map(
+          (subscriptionRuntime) => subscriptionRuntime.subscription.googleTargetCalendarId,
+        );
+        const targetCalendars = Array.from(
+          new Set(requestedCalendars.length > 0 ? requestedCalendars : derivedCalendars),
+        );
+
+        if (targetCalendars.length === 0) {
+          throw new Error("No target calendars resolved for cleanup.");
+        }
+
+        const eventsToDeleteByCalendar = new Map<string, string[]>();
+        let totalEventsToDelete = 0;
+        for (const calendarId of targetCalendars) {
+          const managedEvents = await googleClient.listEventsByPrivateExtendedProperties(calendarId, {
+            app: "outlook-google-sync",
+          });
+          const ids = managedEvents.map((event) => event.id).filter(Boolean);
+          eventsToDeleteByCalendar.set(calendarId, ids);
+          totalEventsToDelete += ids.length;
+        }
+
+        const affectedSubscriptions = config.subscriptions.filter((subscription) =>
+          targetCalendars.includes(subscription.googleTargetCalendarId),
+        );
+
+        const summary = {
+          dryRun: options.dryRun,
+          selectedSubscriptionIds: selectedSubscriptions.map((s) => s.subscription.id),
+          targetCalendars,
+          affectedSubscriptionIds: affectedSubscriptions.map((s) => s.id),
+          eventCountsByCalendar: Object.fromEntries(
+            Array.from(eventsToDeleteByCalendar.entries()).map(([calendarId, ids]) => [
+              calendarId,
+              ids.length,
+            ]),
+          ),
+          totalEventsToDelete,
+        };
+
+        if (options.dryRun) {
+          console.log(JSON.stringify(summary, null, 2));
+          return;
+        }
+
+        if (!options.yes) {
+          throw new Error(
+            "Refusing destructive cleanup without --yes. Re-run with --dry-run to preview or --yes to execute.",
+          );
+        }
+
+        let deletedEventCount = 0;
+        for (const [calendarId, eventIds] of eventsToDeleteByCalendar.entries()) {
+          for (const eventId of eventIds) {
+            await googleClient.deleteEvent(calendarId, eventId);
+            deletedEventCount += 1;
+          }
+        }
+
+        const mappingRowsDeletedBySubscription: Record<string, number> = {};
+        const stateRowsDeletedBySubscription: Record<string, number> = {};
+        for (const subscription of affectedSubscriptions) {
+          mappingRowsDeletedBySubscription[subscription.id] = db.deleteAllMappings(subscription.id);
+          stateRowsDeletedBySubscription[subscription.id] = db.deleteAllState(subscription.id);
+        }
+
+        console.log(
+          JSON.stringify(
+            {
+              ...summary,
+              dryRun: false,
+              deletedEventCount,
+              mappingRowsDeletedBySubscription,
+              stateRowsDeletedBySubscription,
+            },
+            null,
+            2,
+          ),
+        );
+      });
+    },
+  );
 
 program.parseAsync(process.argv).catch((error) => {
   if (error instanceof HttpError) {

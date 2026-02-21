@@ -1,6 +1,6 @@
-# Outlook -> Google Calendar Sync Daemon
+# CalBridge Sync
 
-A local Node.js daemon that mirrors Outlook calendar sources into Google Calendar.
+A local Node.js daemon that bridges Outlook calendar sources into Google Calendar.
 
 ## What it supports
 
@@ -200,7 +200,7 @@ It installs/updates a managed crontab block safely.
 ### Manual cron entry
 
 ```cron
-*/5 * * * * cd /absolute/path/to/outlook-google-calendar-sync && /absolute/path/to/node dist/src/cli.js once >> /absolute/path/to/outlook-google-calendar-sync/logs/cron-sync.log 2>&1
+*/5 * * * * cd /absolute/path/to/calbridge-sync && /absolute/path/to/node dist/src/cli.js once >> /absolute/path/to/calbridge-sync/logs/cron-sync.log 2>&1
 ```
 
 ## Storage and state

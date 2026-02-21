@@ -1,7 +1,14 @@
 import type pino from "pino";
+import * as RRuleModule from "rrule";
 import { HttpError, requestText } from "../http.js";
 import { withRetry } from "../retry.js";
 import type { SourceEvent } from "../sync/types.js";
+
+const RRuleCtor =
+  (RRuleModule as unknown as { RRule?: typeof import("rrule").RRule }).RRule ??
+  (
+    RRuleModule as unknown as { default?: { RRule?: typeof import("rrule").RRule } }
+  ).default?.RRule;
 
 interface IcsProperty {
   name: string;
@@ -13,8 +20,13 @@ interface IntermediateEvent {
   event: SourceEvent;
   startMs: number;
   endMs: number;
+  durationMs: number;
   hasRrule: boolean;
+  rrule: string | null;
   recurrenceId: string | null;
+  occurrenceToken: string;
+  recurrenceTimeZone: string | undefined;
+  exdateTokens: Set<string>;
   uid: string;
 }
 
@@ -74,6 +86,159 @@ function unescapeIcsText(input: string): string {
     .replace(/\\\\/g, "\\");
 }
 
+const WINDOWS_TIMEZONE_TO_IANA: Record<string, string> = {
+  "UTC": "UTC",
+  "GMT Standard Time": "Europe/London",
+  "W. Europe Standard Time": "Europe/Berlin",
+  "Central Europe Standard Time": "Europe/Budapest",
+  "Romance Standard Time": "Europe/Paris",
+  "E. Europe Standard Time": "Europe/Bucharest",
+  "Russian Standard Time": "Europe/Moscow",
+  "Israel Standard Time": "Asia/Jerusalem",
+  "Arab Standard Time": "Asia/Riyadh",
+  "India Standard Time": "Asia/Kolkata",
+  "Singapore Standard Time": "Asia/Singapore",
+  "China Standard Time": "Asia/Shanghai",
+  "Tokyo Standard Time": "Asia/Tokyo",
+  "AUS Eastern Standard Time": "Australia/Sydney",
+  "New Zealand Standard Time": "Pacific/Auckland",
+  "Eastern Standard Time": "America/New_York",
+  "Central Standard Time": "America/Chicago",
+  "Mountain Standard Time": "America/Denver",
+  "Pacific Standard Time": "America/Los_Angeles",
+  "Alaskan Standard Time": "America/Anchorage",
+  "Hawaiian Standard Time": "Pacific/Honolulu",
+};
+
+const dateTimeFormatCache = new Map<string, Intl.DateTimeFormat>();
+const validTimeZoneCache = new Map<string, boolean>();
+
+function isValidIanaTimeZone(timeZone: string): boolean {
+  if (validTimeZoneCache.has(timeZone)) {
+    return validTimeZoneCache.get(timeZone) ?? false;
+  }
+
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone });
+    validTimeZoneCache.set(timeZone, true);
+    return true;
+  } catch {
+    validTimeZoneCache.set(timeZone, false);
+    return false;
+  }
+}
+
+function toValidIanaTimeZone(rawTzid: string | undefined): string | undefined {
+  if (!rawTzid) {
+    return undefined;
+  }
+
+  const cleaned = rawTzid.trim().replace(/^"(.*)"$/, "$1");
+  if (!cleaned) {
+    return undefined;
+  }
+
+  const mapped = WINDOWS_TIMEZONE_TO_IANA[cleaned];
+  if (mapped && isValidIanaTimeZone(mapped)) {
+    return mapped;
+  }
+
+  if (isValidIanaTimeZone(cleaned)) {
+    return cleaned;
+  }
+
+  // Some feeds publish TZID like /mozilla.org/20050126_1/America/Toronto.
+  const slashSeparated = cleaned.split("/").filter(Boolean);
+  for (let i = 0; i < slashSeparated.length; i += 1) {
+    const candidate = slashSeparated.slice(i).join("/");
+    if (isValidIanaTimeZone(candidate)) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
+function getDateTimeFormat(timeZone: string): Intl.DateTimeFormat {
+  const cached = dateTimeFormatCache.get(timeZone);
+  if (cached) {
+    return cached;
+  }
+
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  dateTimeFormatCache.set(timeZone, formatter);
+  return formatter;
+}
+
+function extractPart(parts: Intl.DateTimeFormatPart[], type: Intl.DateTimeFormatPartTypes): number {
+  const part = parts.find((entry) => entry.type === type);
+  return Number(part?.value ?? "0");
+}
+
+function getTimeZoneOffsetMs(timeZone: string, epochMs: number): number {
+  const parts = getDateTimeFormat(timeZone).formatToParts(new Date(epochMs));
+  const year = extractPart(parts, "year");
+  const month = extractPart(parts, "month");
+  const day = extractPart(parts, "day");
+  const hour = extractPart(parts, "hour");
+  const minute = extractPart(parts, "minute");
+  const second = extractPart(parts, "second");
+  const asUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+  return asUtc - epochMs;
+}
+
+function getWallClockPartsInTimeZone(
+  epochMs: number,
+  timeZone: string,
+): {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+} {
+  const parts = getDateTimeFormat(timeZone).formatToParts(new Date(epochMs));
+  return {
+    year: extractPart(parts, "year"),
+    month: extractPart(parts, "month"),
+    day: extractPart(parts, "day"),
+    hour: extractPart(parts, "hour"),
+    minute: extractPart(parts, "minute"),
+    second: extractPart(parts, "second"),
+  };
+}
+
+function toEpochMsForTimeZone(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+  timeZone: string,
+): number {
+  const localAsUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+  let guess = localAsUtc;
+
+  // A few rounds converges on the correct offset across DST boundaries.
+  for (let i = 0; i < 4; i += 1) {
+    const offset = getTimeZoneOffsetMs(timeZone, guess);
+    guess = localAsUtc - offset;
+  }
+
+  return guess;
+}
+
 function parseDateOnly(value: string): { date: string; startMs: number } | null {
   const match = value.match(/^(\d{4})(\d{2})(\d{2})$/);
   if (!match) {
@@ -88,7 +253,10 @@ function parseDateOnly(value: string): { date: string; startMs: number } | null 
   };
 }
 
-function parseDateTime(value: string): { iso: string; epochMs: number } | null {
+function parseDateTime(
+  value: string,
+  rawTzid: string | undefined,
+): { iso: string; epochMs: number; timeZone: string | undefined } | null {
   const match = value.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})?(Z)?$/i);
   if (!match) {
     const parsed = new Date(value);
@@ -98,31 +266,54 @@ function parseDateTime(value: string): { iso: string; epochMs: number } | null {
     return {
       iso: parsed.toISOString(),
       epochMs: parsed.getTime(),
+      timeZone: undefined,
     };
   }
 
   const [, year, month, day, hour, minute, second, zulu] = match;
   const secondValue = Number(second ?? "0");
 
-  const parsed = zulu
-    ? new Date(
-        Date.UTC(
-          Number(year),
-          Number(month) - 1,
-          Number(day),
-          Number(hour),
-          Number(minute),
-          secondValue,
-        ),
-      )
-    : new Date(
-        Number(year),
-        Number(month) - 1,
-        Number(day),
-        Number(hour),
-        Number(minute),
+  const yearNumber = Number(year);
+  const monthNumber = Number(month);
+  const dayNumber = Number(day);
+  const hourNumber = Number(hour);
+  const minuteNumber = Number(minute);
+  const ianaTimeZone = !zulu ? toValidIanaTimeZone(rawTzid) : undefined;
+
+  let epochMs: number;
+  if (zulu) {
+    epochMs = Date.UTC(
+      yearNumber,
+      monthNumber - 1,
+      dayNumber,
+      hourNumber,
+      minuteNumber,
+      secondValue,
+    );
+  } else {
+    if (ianaTimeZone) {
+      epochMs = toEpochMsForTimeZone(
+        yearNumber,
+        monthNumber,
+        dayNumber,
+        hourNumber,
+        minuteNumber,
         secondValue,
+        ianaTimeZone,
       );
+    } else {
+      epochMs = new Date(
+        yearNumber,
+        monthNumber - 1,
+        dayNumber,
+        hourNumber,
+        minuteNumber,
+        secondValue,
+      ).getTime();
+    }
+  }
+
+  const parsed = new Date(epochMs);
 
   if (Number.isNaN(parsed.getTime())) {
     return null;
@@ -131,7 +322,19 @@ function parseDateTime(value: string): { iso: string; epochMs: number } | null {
   return {
     iso: parsed.toISOString(),
     epochMs: parsed.getTime(),
+    timeZone: ianaTimeZone,
   };
+}
+
+function toUtcDateString(epochMs: number): string {
+  return new Date(epochMs).toISOString().slice(0, 10);
+}
+
+function toTemporalIdentityToken(isAllDay: boolean, startMs: number, date: string): string {
+  if (isAllDay) {
+    return date;
+  }
+  return new Date(startMs).toISOString();
 }
 
 function parseTemporal(prop: IcsProperty):
@@ -140,12 +343,14 @@ function parseTemporal(prop: IcsProperty):
       date: string;
       startMs: number;
       identityToken: string;
+      recurrenceTimeZone: undefined;
     }
   | {
       isAllDay: false;
       dateTime: string;
       startMs: number;
       identityToken: string;
+      recurrenceTimeZone: string | undefined;
     }
   | null {
   const isDateOnly = prop.params.VALUE?.toUpperCase() === "DATE" || /^\d{8}$/.test(prop.value);
@@ -159,11 +364,12 @@ function parseTemporal(prop: IcsProperty):
       isAllDay: true,
       date: parsed.date,
       startMs: parsed.startMs,
-      identityToken: parsed.date,
+      identityToken: toTemporalIdentityToken(true, parsed.startMs, parsed.date),
+      recurrenceTimeZone: undefined,
     };
   }
 
-  const parsedDateTime = parseDateTime(prop.value);
+  const parsedDateTime = parseDateTime(prop.value, prop.params.TZID);
   if (!parsedDateTime) {
     return null;
   }
@@ -172,12 +378,72 @@ function parseTemporal(prop: IcsProperty):
     isAllDay: false,
     dateTime: parsedDateTime.iso,
     startMs: parsedDateTime.epochMs,
-    identityToken: prop.value,
+    identityToken: toTemporalIdentityToken(
+      false,
+      parsedDateTime.epochMs,
+      toUtcDateString(parsedDateTime.epochMs),
+    ),
+    recurrenceTimeZone: parsedDateTime.timeZone,
   };
 }
 
 function getFirstProperty(props: IcsProperty[], name: string): IcsProperty | undefined {
   return props.find((prop) => prop.name === name);
+}
+
+function getAllProperties(props: IcsProperty[], name: string): IcsProperty[] {
+  return props.filter((prop) => prop.name === name);
+}
+
+function parseMultiValueTemporalTokens(prop: IcsProperty): string[] {
+  const rawValues = prop.value
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  const tokens: string[] = [];
+  for (const value of rawValues) {
+    const parsed = parseTemporal({
+      ...prop,
+      value,
+    });
+    if (parsed) {
+      tokens.push(parsed.identityToken);
+    }
+  }
+
+  return tokens;
+}
+
+function buildEventTimes(
+  isAllDay: boolean,
+  startMs: number,
+  endMs: number,
+): {
+  start: SourceEvent["start"];
+  end: SourceEvent["end"];
+} {
+  if (isAllDay) {
+    return {
+      start: {
+        date: toUtcDateString(startMs),
+      },
+      end: {
+        date: toUtcDateString(endMs),
+      },
+    };
+  }
+
+  return {
+    start: {
+      dateTime: new Date(startMs).toISOString(),
+      timeZone: "UTC",
+    },
+    end: {
+      dateTime: new Date(endMs).toISOString(),
+      timeZone: "UTC",
+    },
+  };
 }
 
 function buildIntermediateEvent(props: IcsProperty[]): IntermediateEvent | null {
@@ -195,14 +461,6 @@ function buildIntermediateEvent(props: IcsProperty[]): IntermediateEvent | null 
 
   const dtEndProp = getFirstProperty(props, "DTEND");
   let endMs: number;
-  let end:
-    | {
-        date: string;
-      }
-    | {
-        dateTime: string;
-        timeZone: "UTC";
-      };
 
   if (dtEndProp) {
     const endTemporal = parseTemporal(dtEndProp);
@@ -211,26 +469,10 @@ function buildIntermediateEvent(props: IcsProperty[]): IntermediateEvent | null 
     }
 
     endMs = endTemporal.startMs;
-    end = endTemporal.isAllDay
-      ? {
-          date: endTemporal.date,
-        }
-      : {
-          dateTime: endTemporal.dateTime,
-          timeZone: "UTC",
-        };
   } else if (startTemporal.isAllDay) {
     endMs = startTemporal.startMs + 24 * 60 * 60 * 1000;
-    const fallbackDate = new Date(endMs).toISOString().slice(0, 10);
-    end = {
-      date: fallbackDate,
-    };
   } else {
     endMs = startTemporal.startMs + 30 * 60 * 1000;
-    end = {
-      dateTime: new Date(endMs).toISOString(),
-      timeZone: "UTC",
-    };
   }
 
   if (endMs <= startTemporal.startMs) {
@@ -242,10 +484,18 @@ function buildIntermediateEvent(props: IcsProperty[]): IntermediateEvent | null 
   const id = recurrenceId ? `${uid}::${recurrenceId}` : uid;
 
   const status = getFirstProperty(props, "STATUS")?.value.toUpperCase();
-  const hasRrule = Boolean(getFirstProperty(props, "RRULE"));
+  const rrule = getFirstProperty(props, "RRULE")?.value.trim() ?? null;
+  const hasRrule = Boolean(rrule);
+  const exdateTokens = new Set<string>();
+  for (const exdateProp of getAllProperties(props, "EXDATE")) {
+    for (const token of parseMultiValueTemporalTokens(exdateProp)) {
+      exdateTokens.add(token);
+    }
+  }
 
   const lastModifiedProp = getFirstProperty(props, "LAST-MODIFIED");
   const lastModified = lastModifiedProp ? parseTemporal(lastModifiedProp) : null;
+  const eventTimes = buildEventTimes(startTemporal.isAllDay, startTemporal.startMs, endMs);
 
   const event: SourceEvent = {
     id,
@@ -253,15 +503,8 @@ function buildIntermediateEvent(props: IcsProperty[]): IntermediateEvent | null 
     title: unescapeIcsText(getFirstProperty(props, "SUMMARY")?.value ?? "(No title)"),
     description: unescapeIcsText(getFirstProperty(props, "DESCRIPTION")?.value ?? ""),
     location: unescapeIcsText(getFirstProperty(props, "LOCATION")?.value ?? ""),
-    start: startTemporal.isAllDay
-      ? {
-          date: startTemporal.date,
-        }
-      : {
-          dateTime: startTemporal.dateTime,
-          timeZone: "UTC",
-        },
-    end,
+    start: eventTimes.start,
+    end: eventTimes.end,
     isAllDay: startTemporal.isAllDay,
     isCancelled: status === "CANCELLED",
     lastModifiedDateTime:
@@ -275,8 +518,13 @@ function buildIntermediateEvent(props: IcsProperty[]): IntermediateEvent | null 
     event,
     startMs: startTemporal.startMs,
     endMs,
+    durationMs: endMs - startTemporal.startMs,
     hasRrule,
+    rrule,
     recurrenceId,
+    occurrenceToken: recurrenceId ?? startTemporal.identityToken,
+    recurrenceTimeZone: startTemporal.recurrenceTimeZone,
+    exdateTokens,
     uid,
   };
 }
@@ -288,6 +536,130 @@ function overlapsWindow(
   windowEndMs: number,
 ): boolean {
   return eventEndMs > windowStartMs && eventStartMs < windowEndMs;
+}
+
+function buildExpandedOccurrence(master: IntermediateEvent, startMs: number, endMs: number): IntermediateEvent {
+  const token = toTemporalIdentityToken(master.event.isAllDay, startMs, toUtcDateString(startMs));
+  const eventTimes = buildEventTimes(master.event.isAllDay, startMs, endMs);
+
+  return {
+    event: {
+      ...master.event,
+      id: `${master.uid}::${token}`,
+      start: eventTimes.start,
+      end: eventTimes.end,
+      isRecurringMaster: false,
+      seriesMasterId: master.uid,
+    },
+    startMs,
+    endMs,
+    durationMs: endMs - startMs,
+    hasRrule: false,
+    rrule: null,
+    recurrenceId: token,
+    occurrenceToken: token,
+    recurrenceTimeZone: master.recurrenceTimeZone,
+    exdateTokens: new Set<string>(),
+    uid: master.uid,
+  };
+}
+
+function expandRecurringMaster(
+  master: IntermediateEvent,
+  windowStartMs: number,
+  windowEndMs: number,
+): IntermediateEvent[] {
+  if (!master.rrule) {
+    return [];
+  }
+  if (!RRuleCtor) {
+    if (overlapsWindow(master.startMs, master.endMs, windowStartMs, windowEndMs)) {
+      return [master];
+    }
+    return [];
+  }
+
+  try {
+    const parsedOptions = RRuleCtor.parseString(master.rrule);
+    const recurrenceTzid = master.recurrenceTimeZone ?? parsedOptions.tzid;
+    const hasTimeZoneRule = Boolean(recurrenceTzid && !master.event.isAllDay);
+    const dtstartForRule =
+      recurrenceTzid && hasTimeZoneRule
+        ? toFloatingUtcDate(master.startMs, recurrenceTzid)
+        : new Date(master.startMs);
+    const rule = new RRuleCtor({
+      ...parsedOptions,
+      dtstart: dtstartForRule,
+      tzid: recurrenceTzid,
+    });
+
+    const searchStart = new Date(windowStartMs - master.durationMs);
+    const searchEnd = new Date(windowEndMs);
+    const starts = rule.between(searchStart, searchEnd, true);
+
+    const expanded: IntermediateEvent[] = [];
+    for (const occurrenceStart of starts) {
+      const startMs = normalizeRRuleOccurrenceMs(occurrenceStart, hasTimeZoneRule);
+      const endMs = startMs + master.durationMs;
+      const token = toTemporalIdentityToken(master.event.isAllDay, startMs, toUtcDateString(startMs));
+
+      if (master.exdateTokens.has(token)) {
+        continue;
+      }
+
+      if (!overlapsWindow(startMs, endMs, windowStartMs, windowEndMs)) {
+        continue;
+      }
+
+      expanded.push(buildExpandedOccurrence(master, startMs, endMs));
+    }
+
+    return expanded;
+  } catch {
+    if (overlapsWindow(master.startMs, master.endMs, windowStartMs, windowEndMs)) {
+      return [master];
+    }
+    return [];
+  }
+}
+
+function getLastModifiedEpoch(entry: IntermediateEvent): number {
+  const parsed = Date.parse(entry.event.lastModifiedDateTime ?? "");
+  if (!Number.isNaN(parsed)) {
+    return parsed;
+  }
+  return entry.startMs;
+}
+
+function normalizeRRuleOccurrenceMs(occurrence: Date, hasTimeZoneRule: boolean): number {
+  if (!hasTimeZoneRule) {
+    return occurrence.getTime();
+  }
+
+  // rrule.js emits tzid recurrences as floating UTC fields; reinterpret as local time.
+  return new Date(
+    occurrence.getUTCFullYear(),
+    occurrence.getUTCMonth(),
+    occurrence.getUTCDate(),
+    occurrence.getUTCHours(),
+    occurrence.getUTCMinutes(),
+    occurrence.getUTCSeconds(),
+    occurrence.getUTCMilliseconds(),
+  ).getTime();
+}
+
+function toFloatingUtcDate(epochMs: number, recurrenceTzid: string): Date {
+  const parts = getWallClockPartsInTimeZone(epochMs, recurrenceTzid);
+  return new Date(
+    Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.day,
+      parts.hour,
+      parts.minute,
+      parts.second,
+    ),
+  );
 }
 
 export function parseIcsToSourceEvents(
@@ -334,29 +706,78 @@ export function parseIcsToSourceEvents(
     .map((block) => buildIntermediateEvent(block))
     .filter((event): event is IntermediateEvent => Boolean(event));
 
-  const recurrenceInstancesByUid = new Map<string, number>();
-  for (const event of intermediateEvents) {
-    if (event.recurrenceId) {
-      recurrenceInstancesByUid.set(event.uid, (recurrenceInstancesByUid.get(event.uid) ?? 0) + 1);
+  const recurringMastersByUid = new Map<string, IntermediateEvent>();
+  const overridesByUid = new Map<string, Map<string, IntermediateEvent>>();
+  const standaloneEvents: IntermediateEvent[] = [];
+
+  for (const entry of intermediateEvents) {
+    if (entry.hasRrule && !entry.recurrenceId) {
+      recurringMastersByUid.set(entry.uid, entry);
+      continue;
+    }
+
+    if (entry.recurrenceId) {
+      const perUid = overridesByUid.get(entry.uid) ?? new Map<string, IntermediateEvent>();
+      perUid.set(entry.recurrenceId, entry);
+      overridesByUid.set(entry.uid, perUid);
+      continue;
+    }
+
+    standaloneEvents.push(entry);
+  }
+
+  const selectedEvents: IntermediateEvent[] = [];
+  for (const entry of standaloneEvents) {
+    if (overlapsWindow(entry.startMs, entry.endMs, windowStartMs, windowEndMs)) {
+      selectedEvents.push(entry);
     }
   }
 
-  const filtered = intermediateEvents.filter((entry) => {
-    if (!overlapsWindow(entry.startMs, entry.endMs, windowStartMs, windowEndMs)) {
-      return false;
-    }
+  for (const [uid, master] of recurringMastersByUid) {
+    const overrides = overridesByUid.get(uid);
+    const expanded = expandRecurringMaster(master, windowStartMs, windowEndMs);
 
-    if (entry.hasRrule && !entry.recurrenceId && (recurrenceInstancesByUid.get(entry.uid) ?? 0) > 0) {
-      // Avoid duplicate series-master events when expanded instances are already present.
-      return false;
-    }
+    for (const occurrence of expanded) {
+      const token = occurrence.recurrenceId;
+      const override = token ? overrides?.get(token) : undefined;
+      if (override && token) {
+        if (overlapsWindow(override.startMs, override.endMs, windowStartMs, windowEndMs)) {
+          selectedEvents.push(override);
+        }
+        overrides?.delete(token);
+        continue;
+      }
 
-    return true;
+      selectedEvents.push(occurrence);
+    }
+  }
+
+  for (const overrides of overridesByUid.values()) {
+    for (const override of overrides.values()) {
+      if (overlapsWindow(override.startMs, override.endMs, windowStartMs, windowEndMs)) {
+        selectedEvents.push(override);
+      }
+    }
+  }
+
+  const dedupedById = new Map<string, IntermediateEvent>();
+  for (const entry of selectedEvents) {
+    const existing = dedupedById.get(entry.event.id);
+    if (!existing || getLastModifiedEpoch(entry) >= getLastModifiedEpoch(existing)) {
+      dedupedById.set(entry.event.id, entry);
+    }
+  }
+
+  const ordered = [...dedupedById.values()].sort((a, b) => {
+    if (a.startMs !== b.startMs) {
+      return a.startMs - b.startMs;
+    }
+    return a.event.id.localeCompare(b.event.id);
   });
 
   return {
     fetchedCount: intermediateEvents.length,
-    events: filtered.map((entry) => entry.event),
+    events: ordered.map((entry) => entry.event),
   };
 }
 

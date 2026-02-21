@@ -1,5 +1,6 @@
 import type { GoogleEventInput, GoogleSourceEvent } from "../clients/google-calendar.js";
 import type { GraphDateTimeTimeZone, GraphEvent } from "../clients/microsoft-graph.js";
+import type { SourceMode } from "../config.js";
 import type { SourceEvent } from "./types.js";
 
 const APP_MARKER = "outlook-google-sync";
@@ -152,7 +153,11 @@ function buildReminder(reminderMinutesBeforeStart: number | null) {
   };
 }
 
-export function toGoogleEventPayload(source: SourceEvent, subscriptionId: string): GoogleEventInput {
+export function toGoogleEventPayload(
+  source: SourceEvent,
+  subscriptionId: string,
+  sourceMode: SourceMode,
+): GoogleEventInput {
   return {
     summary: source.title,
     description: source.description,
@@ -163,8 +168,11 @@ export function toGoogleEventPayload(source: SourceEvent, subscriptionId: string
     extendedProperties: {
       private: {
         app: APP_MARKER,
-        source: "outlook",
+        source: sourceMode,
+        source_mode: sourceMode,
         subscription_id: subscriptionId,
+        source_event_id: source.id,
+        // Backward compatibility with earlier marker key used by existing installs.
         outlook_event_id: source.id,
       },
     },

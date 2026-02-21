@@ -116,6 +116,7 @@ Notes:
 - `googleTargetCalendarId` can be omitted when `GOOGLE_TARGET_CALENDAR_ID` is set in `.env`.
 - `googleSourceTokenKey` defaults to `default` and selects which Google OAuth token is used for source reads.
 - `googleSourceCalendarId` is the source calendar id shown in Google Calendar settings (`Integrate calendar` -> `Calendar ID`).
+- Managed events now store neutral source markers (`source_event_id`, `source_mode`) while preserving legacy compatibility markers.
 
 ## Authenticate
 

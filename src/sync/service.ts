@@ -47,7 +47,11 @@ export class SyncService {
       );
 
       for (const sourceEvent of activeEventsById.values()) {
-        const payload = toGoogleEventPayload(sourceEvent, this.subscription.id);
+        const payload = toGoogleEventPayload(
+          sourceEvent,
+          this.subscription.id,
+          this.subscription.sourceMode,
+        );
         const existingMapping = mappingBySourceEventId.get(sourceEvent.id);
 
         if (!existingMapping) {

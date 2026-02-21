@@ -72,9 +72,12 @@ describe("toGoogleEventPayload", () => {
       seriesMasterId: null,
     };
 
-    const payload = toGoogleEventPayload(source, "work-primary");
+    const payload = toGoogleEventPayload(source, "work-primary", "microsoft");
     expect(payload.extendedProperties.private.app).toBe("outlook-google-sync");
+    expect(payload.extendedProperties.private.source).toBe("microsoft");
+    expect(payload.extendedProperties.private.source_mode).toBe("microsoft");
     expect(payload.extendedProperties.private.subscription_id).toBe("work-primary");
+    expect(payload.extendedProperties.private.source_event_id).toBe("evt-1");
     expect(payload.extendedProperties.private.outlook_event_id).toBe("evt-1");
     expect(payload.reminders?.useDefault).toBe(false);
     expect(payload.reminders?.overrides?.[0]?.minutes).toBe(10);

@@ -210,3 +210,7 @@ It installs/updates a managed crontab block safely.
   - event mappings (subscription-scoped)
   - sync state (subscription-scoped)
 - Existing single-subscription DB data is migrated automatically to subscription id `default`.
+
+## License
+
+Apache-2.0. See `LICENSE`.

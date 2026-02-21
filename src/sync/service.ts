@@ -3,7 +3,7 @@ import type { RuntimeConfig, SubscriptionConfig } from "../config.js";
 import type { DbClient, EventMapping } from "../db.js";
 import { HttpError } from "../http.js";
 import type { GoogleCalendarClient } from "../clients/google-calendar.js";
-import { findStaleOutlookIds } from "./reconcile.js";
+import { findStaleSourceIds } from "./reconcile.js";
 import { toGoogleEventPayload } from "./mapper.js";
 import type { SourceClient } from "./source-client.js";
 import type { SourceEvent, SyncCycleResult, SyncMetrics } from "./types.js";
@@ -82,7 +82,7 @@ export class SyncService {
         }
       }
 
-      const staleSourceIds = findStaleOutlookIds(
+      const staleSourceIds = findStaleSourceIds(
         mappingBySourceEventId.keys(),
         new Set(activeEventsById.keys()),
       );

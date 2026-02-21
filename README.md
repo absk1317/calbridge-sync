@@ -1,6 +1,6 @@
 # CalBridge Sync
 
-A local Node.js daemon that bridges Outlook calendar sources into Google Calendar.
+A local Node.js daemon that bridges Microsoft, ICS, and Google calendar sources into Google Calendar.
 
 ## What it supports
 
@@ -28,6 +28,10 @@ A local Node.js daemon that bridges Outlook calendar sources into Google Calenda
 2. Add redirect URI:
    - `http://127.0.0.1:53682/oauth2callback`
 3. Copy `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
+
+Google Workspace policy note:
+- Some org accounts block custom OAuth apps with `admin_policy_enforced`.
+- If that happens, ask your admin to allow this app/scopes, or use an alternate source mode (`microsoft` or `ics`) for that account.
 
 ## Microsoft app setup (for `microsoft` subscriptions)
 

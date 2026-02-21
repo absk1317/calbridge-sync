@@ -6,8 +6,10 @@ import path from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import readline from "node:readline/promises";
 
-const BLOCK_START = "# >>> outlook-google-calendar-sync >>>";
-const BLOCK_END = "# <<< outlook-google-calendar-sync <<<";
+const BLOCK_START = "# >>> calbridge-sync >>>";
+const BLOCK_END = "# <<< calbridge-sync <<<";
+const LEGACY_BLOCK_START = "# >>> outlook-google-calendar-sync >>>";
+const LEGACY_BLOCK_END = "# <<< outlook-google-calendar-sync <<<";
 
 function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'"'"'`)}'`;
@@ -84,12 +86,13 @@ function stripManagedBlock(content) {
   let skipping = false;
 
   for (const line of lines) {
-    if (line.trim() === BLOCK_START) {
+    const normalized = line.trim();
+    if (normalized === BLOCK_START || normalized === LEGACY_BLOCK_START) {
       skipping = true;
       continue;
     }
 
-    if (line.trim() === BLOCK_END) {
+    if (normalized === BLOCK_END || normalized === LEGACY_BLOCK_END) {
       skipping = false;
       continue;
     }
@@ -125,7 +128,7 @@ function main() {
     const defaultLogPath = path.join(defaultRepoDir, "logs", "cron-sync.log");
     const defaultInterval = 5;
 
-    console.log("Configure cron job for outlook-google-calendar-sync (current user).\n");
+    console.log("Configure cron job for calbridge-sync (current user).\n");
 
     const repoDirInput = await promptDefault(rl, "Repository directory", defaultRepoDir);
     const repoDir = path.resolve(repoDirInput);

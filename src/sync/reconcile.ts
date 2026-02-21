@@ -1,10 +1,10 @@
-export function findStaleOutlookIds(
-  mappedOutlookIds: Iterable<string>,
-  activeOutlookIds: Set<string>,
+export function findStaleSourceIds(
+  mappedSourceIds: Iterable<string>,
+  activeSourceIds: Set<string>,
 ): string[] {
   const stale: string[] = [];
-  for (const mappedId of mappedOutlookIds) {
-    if (!activeOutlookIds.has(mappedId)) {
+  for (const mappedId of mappedSourceIds) {
+    if (!activeSourceIds.has(mappedId)) {
       stale.push(mappedId);
     }
   }

@@ -5,18 +5,20 @@ import { z } from "zod";
 
 dotenv.config();
 
-export type SourceMode = "microsoft" | "ics";
+export type SourceMode = "microsoft" | "ics" | "google";
 
 const SUBSCRIPTION_ID_REGEX = /^[a-zA-Z0-9._-]+$/;
 
 const BaseConfigSchema = z.object({
-  SOURCE_MODE: z.enum(["microsoft", "ics"]).default("microsoft"),
+  SOURCE_MODE: z.enum(["microsoft", "ics", "google"]).default("microsoft"),
   DEFAULT_SUBSCRIPTION_ID: z.string().regex(SUBSCRIPTION_ID_REGEX).default("default"),
   SUBSCRIPTIONS_FILE: z.string().min(1).optional(),
 
   MICROSOFT_CLIENT_ID: z.string().min(1).optional(),
   MICROSOFT_TENANT_ID: z.string().min(1).default("common"),
   OUTLOOK_ICS_URL: z.string().url().optional(),
+  GOOGLE_SOURCE_CALENDAR_ID: z.string().min(1).optional(),
+  GOOGLE_SOURCE_TOKEN_KEY: z.string().regex(SUBSCRIPTION_ID_REGEX).default("default"),
 
   GOOGLE_CLIENT_ID: z.string().min(1),
   GOOGLE_CLIENT_SECRET: z.string().min(1),
@@ -36,11 +38,13 @@ const BaseConfigSchema = z.object({
 const SubscriptionFileEntrySchema = z.object({
   id: z.string().regex(SUBSCRIPTION_ID_REGEX),
   enabled: z.boolean().optional(),
-  sourceMode: z.enum(["microsoft", "ics"]),
+  sourceMode: z.enum(["microsoft", "ics", "google"]),
   googleTargetCalendarId: z.string().min(1).optional(),
   microsoftClientId: z.string().min(1).optional(),
   microsoftTenantId: z.string().min(1).optional(),
   outlookIcsUrl: z.string().url().optional(),
+  googleSourceCalendarId: z.string().min(1).optional(),
+  googleSourceTokenKey: z.string().regex(SUBSCRIPTION_ID_REGEX).optional(),
 });
 
 const SubscriptionFileSchema = z.union([
@@ -68,6 +72,8 @@ export interface BaseConfig {
   subscriptionsFilePath?: string;
   legacySourceMode: SourceMode;
   legacyOutlookIcsUrl?: string;
+  legacyGoogleSourceCalendarId?: string;
+  legacyGoogleSourceTokenKey: string;
   legacySubscriptionId: string;
 }
 
@@ -79,6 +85,8 @@ export interface SubscriptionConfig {
   microsoftClientId?: string;
   microsoftTenantId?: string;
   outlookIcsUrl?: string;
+  googleSourceCalendarId?: string;
+  googleSourceTokenKey?: string;
 }
 
 export interface RuntimeConfig extends BaseConfig {
@@ -97,6 +105,8 @@ function parseRaw(): ParsedRawConfig {
     MICROSOFT_CLIENT_ID: process.env.MICROSOFT_CLIENT_ID,
     MICROSOFT_TENANT_ID: process.env.MICROSOFT_TENANT_ID,
     OUTLOOK_ICS_URL: process.env.OUTLOOK_ICS_URL,
+    GOOGLE_SOURCE_CALENDAR_ID: process.env.GOOGLE_SOURCE_CALENDAR_ID,
+    GOOGLE_SOURCE_TOKEN_KEY: process.env.GOOGLE_SOURCE_TOKEN_KEY,
 
     GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
@@ -146,6 +156,8 @@ function toBaseConfig(parsed: ParsedRawConfig): BaseConfig {
     subscriptionsFilePath,
     legacySourceMode: parsed.SOURCE_MODE,
     legacyOutlookIcsUrl: parsed.OUTLOOK_ICS_URL,
+    legacyGoogleSourceCalendarId: parsed.GOOGLE_SOURCE_CALENDAR_ID,
+    legacyGoogleSourceTokenKey: parsed.GOOGLE_SOURCE_TOKEN_KEY,
     legacySubscriptionId: parsed.DEFAULT_SUBSCRIPTION_ID,
   };
 }
@@ -175,6 +187,8 @@ function loadLegacySingleSubscription(base: BaseConfig): SubscriptionFileEntry[]
       microsoftClientId: base.defaultMicrosoftClientId,
       microsoftTenantId: base.defaultMicrosoftTenantId,
       outlookIcsUrl: base.legacyOutlookIcsUrl,
+      googleSourceCalendarId: base.legacyGoogleSourceCalendarId,
+      googleSourceTokenKey: base.legacyGoogleSourceTokenKey,
     },
   ];
 }
@@ -204,6 +218,24 @@ function normalizeSubscription(base: BaseConfig, draft: SubscriptionFileEntry): 
       googleTargetCalendarId,
       microsoftClientId,
       microsoftTenantId,
+    };
+  }
+
+  if (draft.sourceMode === "google") {
+    const googleSourceCalendarId = draft.googleSourceCalendarId ?? base.legacyGoogleSourceCalendarId;
+    if (!googleSourceCalendarId) {
+      throw new Error(
+        `Subscription '${draft.id}' uses google source but googleSourceCalendarId and GOOGLE_SOURCE_CALENDAR_ID are both missing.`,
+      );
+    }
+
+    return {
+      id: draft.id,
+      enabled: draft.enabled ?? true,
+      sourceMode: "google",
+      googleTargetCalendarId,
+      googleSourceCalendarId,
+      googleSourceTokenKey: draft.googleSourceTokenKey ?? base.legacyGoogleSourceTokenKey,
     };
   }
 

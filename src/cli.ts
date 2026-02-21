@@ -22,12 +22,13 @@ import {
 import { DbClient } from "./db.js";
 import { HttpError } from "./http.js";
 import { createLogger } from "./logger.js";
+import { GoogleSourceClient } from "./sync/google-source-client.js";
 import { IcsSourceClient } from "./sync/ics-source-client.js";
 import { MicrosoftSourceClient } from "./sync/microsoft-source-client.js";
 import type { SourceClient } from "./sync/source-client.js";
 import { SyncService } from "./sync/service.js";
 
-const GOOGLE_TOKEN_KEY = "default";
+const GOOGLE_TARGET_TOKEN_KEY = "default";
 
 interface BaseRuntime {
   config: BaseConfig;
@@ -90,7 +91,7 @@ async function withRuntime<T>(fn: (runtime: Runtime) => Promise<T>): Promise<T> 
   const tokenStore = new TokenStore(db, config.tokenEncryptionKey, logger);
 
   const googleClient = new GoogleCalendarClient(
-    () => getGoogleAccessToken(toGoogleAuthConfig(config), tokenStore, GOOGLE_TOKEN_KEY),
+    () => getGoogleAccessToken(toGoogleAuthConfig(config), tokenStore, GOOGLE_TARGET_TOKEN_KEY),
     logger,
   );
 
@@ -110,11 +111,21 @@ async function withRuntime<T>(fn: (runtime: Runtime) => Promise<T>): Promise<T> 
           logger,
         );
         sourceClient = new MicrosoftSourceClient(graphClient);
-      } else {
+      } else if (subscription.sourceMode === "ics") {
         if (!subscription.outlookIcsUrl) {
           throw new Error(`Subscription '${subscription.id}' missing OUTLOOK_ICS_URL.`);
         }
         sourceClient = new IcsSourceClient(new IcsFeedClient(subscription.outlookIcsUrl, logger));
+      } else {
+        if (!subscription.googleSourceCalendarId) {
+          throw new Error(`Subscription '${subscription.id}' missing googleSourceCalendarId.`);
+        }
+        const googleSourceTokenKey = subscription.googleSourceTokenKey ?? GOOGLE_TARGET_TOKEN_KEY;
+        const googleSourceClient = new GoogleCalendarClient(
+          () => getGoogleAccessToken(toGoogleAuthConfig(config), tokenStore, googleSourceTokenKey),
+          logger,
+        );
+        sourceClient = new GoogleSourceClient(googleSourceClient, subscription.googleSourceCalendarId);
       }
 
       const syncService = new SyncService(config, subscription, db, sourceClient, googleClient, logger);
@@ -208,7 +219,7 @@ function parseCsvList(values: string[]): string[] {
 }
 
 const program = new Command();
-program.name("sync-daemon").description("Outlook to Google calendar sync daemon").version("0.2.0");
+program.name("sync-daemon").description("Calendar source to Google calendar sync daemon").version("0.2.0");
 
 program
   .command("auth:microsoft")
@@ -229,9 +240,14 @@ program
 program
   .command("auth:google")
   .description("Authenticate Google account via OAuth redirect")
-  .action(async () => {
+  .option(
+    "-k, --token-key <key>",
+    "token key (use distinct keys for multiple Google accounts)",
+    GOOGLE_TARGET_TOKEN_KEY,
+  )
+  .action(async (options: { tokenKey: string }) => {
     await withBaseRuntime(async ({ config, tokenStore, logger }) => {
-      await authenticateGoogleOAuth(toGoogleAuthConfig(config), tokenStore, logger, GOOGLE_TOKEN_KEY);
+      await authenticateGoogleOAuth(toGoogleAuthConfig(config), tokenStore, logger, options.tokenKey);
     });
   });
 
@@ -254,7 +270,9 @@ program
   .description("Verify database and API access with current credentials")
   .action(async () => {
     await withRuntime(async ({ subscriptions, googleClient, tokenStore }) => {
-      tokenStore.get("google", GOOGLE_TOKEN_KEY);
+      if (!tokenStore.get("google", GOOGLE_TARGET_TOKEN_KEY)) {
+        throw new Error("Google target token not found. Run auth:google first.");
+      }
 
       const uniqueTargetCalendars = new Set<string>();
       for (const subscriptionRuntime of subscriptions) {
@@ -270,7 +288,21 @@ program
         const { subscription, sourceClient } = subscriptionRuntime;
 
         if (subscription.sourceMode === "microsoft") {
-          tokenStore.get("microsoft", subscription.id);
+          if (!tokenStore.get("microsoft", subscription.id)) {
+            throw new Error(
+              `Microsoft token for subscription '${subscription.id}' not found. Run auth:microsoft --subscription ${subscription.id} first.`,
+            );
+          }
+        }
+        if (subscription.sourceMode === "google") {
+          const sourceTokenKey = subscription.googleSourceTokenKey ?? GOOGLE_TARGET_TOKEN_KEY;
+          if (!tokenStore.get("google", sourceTokenKey)) {
+            throw new Error(
+              sourceTokenKey === GOOGLE_TARGET_TOKEN_KEY
+                ? "Google source token not found. Run auth:google first."
+                : `Google source token '${sourceTokenKey}' not found. Run auth:google --token-key ${sourceTokenKey} first.`,
+            );
+          }
         }
 
         await sourceClient.healthCheck();
@@ -386,7 +418,9 @@ program
       yes: boolean;
     }) => {
       await withRuntime(async ({ config, db, googleClient, subscriptions, tokenStore }) => {
-        tokenStore.get("google", GOOGLE_TOKEN_KEY);
+        if (!tokenStore.get("google", GOOGLE_TARGET_TOKEN_KEY)) {
+          throw new Error("Google target token not found. Run auth:google first.");
+        }
 
         const requestedSubscriptionIds = parseCsvList(options.subscription ?? []);
         const selectedSubscriptions =

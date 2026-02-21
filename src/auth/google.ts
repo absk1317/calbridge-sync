@@ -167,7 +167,11 @@ export async function getGoogleAccessToken(
 ): Promise<string> {
   const stored = tokenStore.get("google", tokenKey);
   if (!stored) {
-    throw new Error("Google token not found. Run auth:google first.");
+    throw new Error(
+      tokenKey === "default"
+        ? "Google token not found. Run auth:google first."
+        : `Google token '${tokenKey}' not found. Run auth:google --token-key ${tokenKey} first.`,
+    );
   }
 
   if (stored.expiresAt > Date.now() + 30_000) {

@@ -14,6 +14,14 @@
       "microsoftClientId": "your-azure-app-client-id",
       "microsoftTenantId": "common",
       "googleTargetCalendarId": "your_target_calendar_id@group.calendar.google.com"
+    },
+    {
+      "id": "work-google",
+      "enabled": false,
+      "sourceMode": "google",
+      "googleSourceCalendarId": "your_source_calendar_id@group.calendar.google.com",
+      "googleSourceTokenKey": "work-google",
+      "googleTargetCalendarId": "your_target_calendar_id@group.calendar.google.com"
     }
   ]
 }

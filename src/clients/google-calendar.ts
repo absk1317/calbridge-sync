@@ -40,6 +40,28 @@ interface GoogleEventListPage {
   nextPageToken?: string;
 }
 
+export interface GoogleSourceEvent {
+  id?: string;
+  iCalUID?: string;
+  recurringEventId?: string;
+  summary?: string;
+  description?: string;
+  location?: string;
+  status?: string;
+  updated?: string;
+  start?: GoogleEventDateTime;
+  end?: GoogleEventDateTime;
+  reminders?: {
+    useDefault?: boolean;
+    overrides?: Array<{ method?: string; minutes?: number }>;
+  };
+}
+
+interface GoogleSourceEventListPage {
+  items?: GoogleSourceEvent[];
+  nextPageToken?: string;
+}
+
 export class GoogleCalendarClient {
   constructor(
     private readonly getAccessToken: () => Promise<string>,
@@ -113,6 +135,43 @@ export class GoogleCalendarClient {
         "GET",
         undefined,
         "google_list_events_by_private_extended_properties",
+      );
+      results.push(...(page.items ?? []));
+      pageToken = page.nextPageToken;
+    } while (pageToken);
+
+    return results;
+  }
+
+  async listCalendarView(calendarId: string, startIso: string, endIso: string): Promise<GoogleSourceEvent[]> {
+    const encodedCalendarId = encodeURIComponent(calendarId);
+    const results: GoogleSourceEvent[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const url = new URL(
+        `https://www.googleapis.com/calendar/v3/calendars/${encodedCalendarId}/events`,
+      );
+      url.searchParams.set("timeMin", startIso);
+      url.searchParams.set("timeMax", endIso);
+      url.searchParams.set("maxResults", "2500");
+      url.searchParams.set("singleEvents", "true");
+      url.searchParams.set("showDeleted", "true");
+      url.searchParams.set("orderBy", "startTime");
+      url.searchParams.set("timeZone", "UTC");
+      url.searchParams.set(
+        "fields",
+        "items(id,iCalUID,recurringEventId,summary,description,location,status,updated,start,end,reminders),nextPageToken",
+      );
+      if (pageToken) {
+        url.searchParams.set("pageToken", pageToken);
+      }
+
+      const page = await this.request<GoogleSourceEventListPage>(
+        url.toString(),
+        "GET",
+        undefined,
+        "google_list_calendar_view",
       );
       results.push(...(page.items ?? []));
       pageToken = page.nextPageToken;

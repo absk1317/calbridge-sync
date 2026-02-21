@@ -1,4 +1,4 @@
-import type { GoogleEventInput } from "../clients/google-calendar.js";
+import type { GoogleEventInput, GoogleSourceEvent } from "../clients/google-calendar.js";
 import type { GraphDateTimeTimeZone, GraphEvent } from "../clients/microsoft-graph.js";
 import type { SourceEvent } from "./types.js";
 
@@ -28,6 +28,34 @@ function normalizeDateTime(raw: GraphDateTimeTimeZone): { dateTime: string; time
 
 function normalizeAllDay(raw: GraphDateTimeTimeZone): { date: string } {
   return { date: raw.dateTime.slice(0, 10) };
+}
+
+function normalizeGoogleDateTime(
+  raw: { date?: string; dateTime?: string } | undefined,
+): { dateTime: string; timeZone: string } | { date: string } | null {
+  if (!raw) {
+    return null;
+  }
+
+  if (raw.date) {
+    return { date: raw.date };
+  }
+
+  if (!raw.dateTime) {
+    return null;
+  }
+
+  const hasZone = /[zZ]$|[+-]\d\d:\d\d$/.test(raw.dateTime);
+  const normalized = hasZone ? raw.dateTime : `${raw.dateTime}Z`;
+  const parsed = new Date(normalized);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return {
+    dateTime: parsed.toISOString(),
+    timeZone: "UTC",
+  };
 }
 
 function normalizeDescription(event: GraphEvent): string {
@@ -72,6 +100,38 @@ export function normalizeOutlookEvent(event: GraphEvent): SourceEvent | null {
         : null,
     isRecurringMaster: event.type === "seriesMaster",
     seriesMasterId: event.seriesMasterId ?? null,
+  };
+}
+
+export function normalizeGoogleCalendarEvent(event: GoogleSourceEvent): SourceEvent | null {
+  if (!event.id || !event.start || !event.end) {
+    return null;
+  }
+
+  const normalizedStart = normalizeGoogleDateTime(event.start);
+  const normalizedEnd = normalizeGoogleDateTime(event.end);
+  if (!normalizedStart || !normalizedEnd) {
+    return null;
+  }
+
+  const isAllDay = "date" in normalizedStart;
+  const reminderOverride = event.reminders?.overrides?.find((override) => override.method === "popup");
+
+  return {
+    id: event.id,
+    iCalUid: event.iCalUID ?? null,
+    title: event.summary?.trim() || "(No title)",
+    description: event.description ?? "",
+    location: event.location?.trim() || "",
+    start: normalizedStart,
+    end: normalizedEnd,
+    isAllDay,
+    isCancelled: event.status === "cancelled",
+    lastModifiedDateTime: event.updated ?? null,
+    reminderMinutesBeforeStart:
+      typeof reminderOverride?.minutes === "number" ? reminderOverride.minutes : null,
+    isRecurringMaster: false,
+    seriesMasterId: event.recurringEventId ?? null,
   };
 }
 

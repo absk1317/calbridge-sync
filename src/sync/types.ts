@@ -32,7 +32,7 @@ export interface SyncMetrics {
 
 export interface SyncCycleResult {
   subscriptionId: string;
-  sourceMode: "microsoft" | "ics";
+  sourceMode: "microsoft" | "ics" | "google";
   targetCalendarId: string;
   windowStartIso: string;
   windowEndIso: string;

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
+import type { GoogleSourceEvent } from "../src/clients/google-calendar.js";
 import type { GraphEvent } from "../src/clients/microsoft-graph.js";
-import { normalizeOutlookEvent, toGoogleEventPayload } from "../src/sync/mapper.js";
+import {
+  normalizeGoogleCalendarEvent,
+  normalizeOutlookEvent,
+  toGoogleEventPayload,
+} from "../src/sync/mapper.js";
 
 describe("normalizeOutlookEvent", () => {
   it("normalizes timed events to UTC dateTime", () => {
@@ -73,5 +78,43 @@ describe("toGoogleEventPayload", () => {
     expect(payload.extendedProperties.private.outlook_event_id).toBe("evt-1");
     expect(payload.reminders?.useDefault).toBe(false);
     expect(payload.reminders?.overrides?.[0]?.minutes).toBe(10);
+  });
+});
+
+describe("normalizeGoogleCalendarEvent", () => {
+  it("normalizes timed Google source events to UTC dateTime", () => {
+    const raw: GoogleSourceEvent = {
+      id: "g-evt-1",
+      iCalUID: "ical-1",
+      summary: "Work Sync",
+      description: "agenda",
+      location: "Meet",
+      status: "confirmed",
+      updated: "2026-03-01T10:00:00Z",
+      start: { dateTime: "2026-03-01T11:30:00-05:00" },
+      end: { dateTime: "2026-03-01T12:00:00-05:00" },
+      reminders: { overrides: [{ method: "popup", minutes: 5 }] },
+    };
+
+    const normalized = normalizeGoogleCalendarEvent(raw);
+    expect(normalized).not.toBeNull();
+    expect(normalized?.start.dateTime).toBe("2026-03-01T16:30:00.000Z");
+    expect(normalized?.end.dateTime).toBe("2026-03-01T17:00:00.000Z");
+    expect(normalized?.reminderMinutesBeforeStart).toBe(5);
+  });
+
+  it("normalizes all-day Google source events", () => {
+    const raw: GoogleSourceEvent = {
+      id: "g-evt-2",
+      summary: "Holiday",
+      status: "confirmed",
+      start: { date: "2026-12-25" },
+      end: { date: "2026-12-26" },
+    };
+
+    const normalized = normalizeGoogleCalendarEvent(raw);
+    expect(normalized?.isAllDay).toBe(true);
+    expect(normalized?.start.date).toBe("2026-12-25");
+    expect(normalized?.end.date).toBe("2026-12-26");
   });
 });

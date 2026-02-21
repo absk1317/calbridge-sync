@@ -7,7 +7,7 @@
   "bin": {
     "sync-daemon": "dist/src/cli.js"
   },
-  "description": "Local daemon to sync Outlook calendar events to Google Calendar",
+  "description": "Local daemon to sync calendar sources into Google Calendar",
   "engines": {
     "node": ">=20.0.0"
   },

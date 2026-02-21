@@ -7,3 +7,4 @@ data/*.db-*
 coverage/
 .vscode/
 .DS_Store
+logs/

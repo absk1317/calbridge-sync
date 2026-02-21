@@ -3,16 +3,16 @@ import type { AppConfig } from "../config.js";
 import type { DbClient, EventMapping } from "../db.js";
 import { HttpError } from "../http.js";
 import type { GoogleCalendarClient } from "../clients/google-calendar.js";
-import type { MicrosoftGraphClient } from "../clients/microsoft-graph.js";
 import { findStaleOutlookIds } from "./reconcile.js";
-import { normalizeOutlookEvent, toGoogleEventPayload } from "./mapper.js";
+import { toGoogleEventPayload } from "./mapper.js";
+import type { SourceClient } from "./source-client.js";
 import type { SourceEvent, SyncCycleResult, SyncMetrics } from "./types.js";
 
 export class SyncService {
   constructor(
     private readonly config: AppConfig,
     private readonly db: DbClient,
-    private readonly graphClient: MicrosoftGraphClient,
+    private readonly sourceClient: SourceClient,
     private readonly googleClient: GoogleCalendarClient,
     private readonly logger: pino.Logger,
   ) {}
@@ -28,12 +28,9 @@ export class SyncService {
     };
 
     try {
-      const graphEvents = await this.graphClient.listCalendarView(startIso, endIso);
-      metrics.fetched = graphEvents.length;
-
-      const sourceEvents = graphEvents
-        .map(normalizeOutlookEvent)
-        .filter((event): event is SourceEvent => Boolean(event));
+      const sourceBatch = await this.sourceClient.listEvents(startIso, endIso);
+      metrics.fetched = sourceBatch.fetchedCount;
+      const sourceEvents = sourceBatch.events;
       metrics.considered = sourceEvents.length;
 
       const activeEventsById = new Map<string, SourceEvent>();

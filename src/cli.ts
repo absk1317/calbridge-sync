@@ -6,12 +6,16 @@ import { authenticateGoogleOAuth, getGoogleAccessToken } from "./auth/google.js"
 import { authenticateMicrosoftDeviceCode, getMicrosoftAccessToken } from "./auth/microsoft.js";
 import { TokenStore } from "./auth/token-store.js";
 import { GoogleCalendarClient } from "./clients/google-calendar.js";
+import { IcsFeedClient } from "./clients/ics-feed.js";
 import { MicrosoftGraphClient } from "./clients/microsoft-graph.js";
 import type { AppConfig, BaseConfig } from "./config.js";
 import { loadAppConfig, loadBaseConfig } from "./config.js";
 import { DbClient } from "./db.js";
 import { HttpError } from "./http.js";
 import { createLogger } from "./logger.js";
+import { IcsSourceClient } from "./sync/ics-source-client.js";
+import { MicrosoftSourceClient } from "./sync/microsoft-source-client.js";
+import type { SourceClient } from "./sync/source-client.js";
 import { SyncService } from "./sync/service.js";
 
 interface BaseRuntime {
@@ -26,7 +30,7 @@ interface SyncRuntime {
   db: DbClient;
   logger: pino.Logger;
   tokenStore: TokenStore;
-  graphClient: MicrosoftGraphClient;
+  sourceClient: SourceClient;
   googleClient: GoogleCalendarClient;
   syncService: SyncService;
 }
@@ -50,12 +54,23 @@ async function withSyncRuntime<T>(fn: (runtime: SyncRuntime) => Promise<T>): Pro
   const db = new DbClient(config.sqlitePath);
   const tokenStore = new TokenStore(db, config.tokenEncryptionKey, logger);
 
-  const graphClient = new MicrosoftGraphClient(
-    () => getMicrosoftAccessToken(config, tokenStore),
-    logger,
-  );
   const googleClient = new GoogleCalendarClient(() => getGoogleAccessToken(config, tokenStore), logger);
-  const syncService = new SyncService(config, db, graphClient, googleClient, logger);
+
+  let sourceClient: SourceClient;
+  if (config.sourceMode === "microsoft") {
+    const graphClient = new MicrosoftGraphClient(
+      () => getMicrosoftAccessToken(config, tokenStore),
+      logger,
+    );
+    sourceClient = new MicrosoftSourceClient(graphClient);
+  } else {
+    if (!config.outlookIcsUrl) {
+      throw new Error("OUTLOOK_ICS_URL is required when SOURCE_MODE=ics");
+    }
+    sourceClient = new IcsSourceClient(new IcsFeedClient(config.outlookIcsUrl, logger));
+  }
+
+  const syncService = new SyncService(config, db, sourceClient, googleClient, logger);
 
   try {
     return await fn({
@@ -63,7 +78,7 @@ async function withSyncRuntime<T>(fn: (runtime: SyncRuntime) => Promise<T>): Pro
       db,
       logger,
       tokenStore,
-      graphClient,
+      sourceClient,
       googleClient,
       syncService,
     });
@@ -107,18 +122,21 @@ program
   .command("health")
   .description("Verify database and API access with current credentials")
   .action(async () => {
-    await withSyncRuntime(async ({ config, graphClient, googleClient, tokenStore }) => {
+    await withSyncRuntime(async ({ config, sourceClient, googleClient, tokenStore }) => {
       const status = {
         database: "ok",
-        microsoft: "ok",
+        source: sourceClient.name,
+        microsoft: config.sourceMode === "microsoft" ? "ok" : "skipped",
         google: "ok",
         targetCalendarId: config.googleTargetCalendarId,
       };
 
-      tokenStore.get("microsoft");
+      if (config.sourceMode === "microsoft") {
+        tokenStore.get("microsoft");
+      }
       tokenStore.get("google");
 
-      await graphClient.healthCheck();
+      await sourceClient.healthCheck();
       await googleClient.healthCheck(config.googleTargetCalendarId);
       console.log(JSON.stringify(status, null, 2));
     });
@@ -195,5 +213,16 @@ program.parseAsync(process.argv).catch((error) => {
 
   const message = error instanceof Error ? error.message : String(error);
   console.error(message);
+
+  if (
+    typeof message === "string" &&
+    message.includes("Microsoft token not found") &&
+    process.env.OUTLOOK_ICS_URL
+  ) {
+    console.error(
+      "Hint: OUTLOOK_ICS_URL is set. If you want to use ICS mode, set SOURCE_MODE=ics in .env and rerun.",
+    );
+  }
+
   process.exitCode = 1;
 });

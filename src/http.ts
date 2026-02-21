@@ -48,6 +48,31 @@ export async function requestJson<T>(
   return (parsed ?? {}) as T;
 }
 
+export async function requestText(
+  input: string,
+  init: RequestInit = {},
+  timeoutMs = 20_000,
+): Promise<string> {
+  const response = await fetch(input, {
+    ...init,
+    signal: init.signal ?? AbortSignal.timeout(timeoutMs),
+  });
+
+  const text = await response.text();
+  const parsed = tryParseBody(text);
+
+  if (!response.ok) {
+    throw new HttpError(
+      `Request failed with status ${response.status} for ${input}`,
+      response.status,
+      parsed,
+      response.headers,
+    );
+  }
+
+  return text;
+}
+
 export function toFormBody(params: Record<string, string>): string {
   const body = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {

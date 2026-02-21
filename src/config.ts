@@ -4,9 +4,13 @@ import { z } from "zod";
 
 dotenv.config();
 
+export type SourceMode = "microsoft" | "ics";
+
 const BaseConfigSchema = z.object({
-  MICROSOFT_CLIENT_ID: z.string().min(1),
+  SOURCE_MODE: z.enum(["microsoft", "ics"]).default("microsoft"),
+  MICROSOFT_CLIENT_ID: z.string().min(1).optional(),
   MICROSOFT_TENANT_ID: z.string().min(1).default("common"),
+  OUTLOOK_ICS_URL: z.string().url().optional(),
   GOOGLE_CLIENT_ID: z.string().min(1),
   GOOGLE_CLIENT_SECRET: z.string().min(1),
   GOOGLE_TARGET_CALENDAR_ID: z.string().min(1).optional(),
@@ -22,8 +26,10 @@ const BaseConfigSchema = z.object({
 });
 
 export interface BaseConfig {
-  microsoftClientId: string;
+  sourceMode: SourceMode;
+  microsoftClientId?: string;
   microsoftTenantId: string;
+  outlookIcsUrl?: string;
   googleClientId: string;
   googleClientSecret: string;
   tokenEncryptionKey: string;
@@ -41,8 +47,10 @@ export interface AppConfig extends BaseConfig {
 
 function parseRaw() {
   return BaseConfigSchema.parse({
+    SOURCE_MODE: process.env.SOURCE_MODE,
     MICROSOFT_CLIENT_ID: process.env.MICROSOFT_CLIENT_ID,
     MICROSOFT_TENANT_ID: process.env.MICROSOFT_TENANT_ID,
+    OUTLOOK_ICS_URL: process.env.OUTLOOK_ICS_URL,
     GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
     GOOGLE_TARGET_CALENDAR_ID: process.env.GOOGLE_TARGET_CALENDAR_ID,
@@ -59,8 +67,10 @@ function parseRaw() {
 export function loadBaseConfig(): BaseConfig {
   const parsed = parseRaw();
   return {
+    sourceMode: parsed.SOURCE_MODE,
     microsoftClientId: parsed.MICROSOFT_CLIENT_ID,
     microsoftTenantId: parsed.MICROSOFT_TENANT_ID,
+    outlookIcsUrl: parsed.OUTLOOK_ICS_URL,
     googleClientId: parsed.GOOGLE_CLIENT_ID,
     googleClientSecret: parsed.GOOGLE_CLIENT_SECRET,
     tokenEncryptionKey: parsed.TOKEN_ENCRYPTION_KEY,
@@ -78,10 +88,18 @@ export function loadAppConfig(): AppConfig {
   if (!parsed.GOOGLE_TARGET_CALENDAR_ID) {
     throw new Error("GOOGLE_TARGET_CALENDAR_ID is required for sync commands");
   }
+  if (parsed.SOURCE_MODE === "microsoft" && !parsed.MICROSOFT_CLIENT_ID) {
+    throw new Error("MICROSOFT_CLIENT_ID is required when SOURCE_MODE=microsoft");
+  }
+  if (parsed.SOURCE_MODE === "ics" && !parsed.OUTLOOK_ICS_URL) {
+    throw new Error("OUTLOOK_ICS_URL is required when SOURCE_MODE=ics");
+  }
 
   return {
+    sourceMode: parsed.SOURCE_MODE,
     microsoftClientId: parsed.MICROSOFT_CLIENT_ID,
     microsoftTenantId: parsed.MICROSOFT_TENANT_ID,
+    outlookIcsUrl: parsed.OUTLOOK_ICS_URL,
     googleClientId: parsed.GOOGLE_CLIENT_ID,
     googleClientSecret: parsed.GOOGLE_CLIENT_SECRET,
     googleTargetCalendarId: parsed.GOOGLE_TARGET_CALENDAR_ID,

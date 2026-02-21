@@ -47,6 +47,15 @@ function deviceCodeEndpoint(config: BaseConfig): string {
   return `https://login.microsoftonline.com/${config.microsoftTenantId}/oauth2/v2.0/devicecode`;
 }
 
+function requireMicrosoftClientId(config: BaseConfig): string {
+  if (!config.microsoftClientId) {
+    throw new Error(
+      "MICROSOFT_CLIENT_ID is required. Set it in .env before running auth:microsoft or SOURCE_MODE=microsoft sync.",
+    );
+  }
+  return config.microsoftClientId;
+}
+
 function toStoredToken(response: OAuthTokenResponse, fallbackRefreshToken?: string): OAuthToken {
   const refreshToken = response.refresh_token ?? fallbackRefreshToken;
   if (!refreshToken) {
@@ -67,6 +76,7 @@ export async function authenticateMicrosoftDeviceCode(
   tokenStore: TokenStore,
   logger: pino.Logger,
 ): Promise<void> {
+  const microsoftClientId = requireMicrosoftClientId(config);
   const scope = MICROSOFT_SCOPES.join(" ");
 
   let deviceCode: DeviceCodeResponse;
@@ -77,7 +87,7 @@ export async function authenticateMicrosoftDeviceCode(
         "Content-Type": "application/x-www-form-urlencoded",
       },
       body: toFormBody({
-        client_id: config.microsoftClientId,
+        client_id: microsoftClientId,
         scope,
       }),
     });
@@ -129,7 +139,7 @@ export async function authenticateMicrosoftDeviceCode(
         },
         body: toFormBody({
           grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-          client_id: config.microsoftClientId,
+          client_id: microsoftClientId,
           device_code: deviceCode.device_code,
         }),
       });
@@ -170,6 +180,7 @@ export async function getMicrosoftAccessToken(
   config: BaseConfig,
   tokenStore: TokenStore,
 ): Promise<string> {
+  const microsoftClientId = requireMicrosoftClientId(config);
   const stored = tokenStore.get("microsoft");
   if (!stored) {
     throw new Error("Microsoft token not found. Run auth:microsoft first.");
@@ -186,7 +197,7 @@ export async function getMicrosoftAccessToken(
     },
     body: toFormBody({
       grant_type: "refresh_token",
-      client_id: config.microsoftClientId,
+      client_id: microsoftClientId,
       refresh_token: stored.refreshToken,
       scope: MICROSOFT_SCOPES.join(" "),
     }),

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.env.local
+data/*.db
+data/*.db-*
+coverage/
+.vscode/
+.DS_Store

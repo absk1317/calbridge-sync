@@ -1,7 +1,6 @@
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 import type pino from "pino";
-import type { BaseConfig } from "../config.js";
 import { requestJson, toFormBody } from "../http.js";
 import type { OAuthToken } from "../types.js";
 import type { TokenStore } from "./token-store.js";
@@ -11,6 +10,12 @@ const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/calendar.readonly",
 ];
 
+export interface GoogleAuthConfig {
+  googleClientId: string;
+  googleClientSecret: string;
+  googleOAuthRedirectPort: number;
+}
+
 interface GoogleTokenResponse {
   access_token: string;
   expires_in: number;
@@ -19,7 +24,7 @@ interface GoogleTokenResponse {
   token_type?: string;
 }
 
-function redirectUri(config: BaseConfig): string {
+function redirectUri(config: GoogleAuthConfig): string {
   return `http://127.0.0.1:${config.googleOAuthRedirectPort}/oauth2callback`;
 }
 
@@ -27,7 +32,7 @@ function tokenEndpoint(): string {
   return "https://oauth2.googleapis.com/token";
 }
 
-function buildAuthUrl(config: BaseConfig, state: string): string {
+function buildAuthUrl(config: GoogleAuthConfig, state: string): string {
   const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   url.searchParams.set("client_id", config.googleClientId);
   url.searchParams.set("redirect_uri", redirectUri(config));
@@ -55,9 +60,10 @@ function toStoredToken(response: GoogleTokenResponse, fallbackRefreshToken?: str
 }
 
 export async function authenticateGoogleOAuth(
-  config: BaseConfig,
+  config: GoogleAuthConfig,
   tokenStore: TokenStore,
   logger: pino.Logger,
+  tokenKey = "default",
 ): Promise<void> {
   const state = randomBytes(16).toString("hex");
   const authUrl = buildAuthUrl(config, state);
@@ -78,12 +84,12 @@ export async function authenticateGoogleOAuth(
     }),
   });
 
-  tokenStore.save("google", toStoredToken(tokenResponse));
-  logger.info("Google authentication completed");
+  tokenStore.save("google", toStoredToken(tokenResponse), tokenKey);
+  logger.info({ tokenKey }, "Google authentication completed");
 }
 
 async function waitForOAuthCode(
-  config: BaseConfig,
+  config: GoogleAuthConfig,
   expectedState: string,
   authUrl: string,
   logger: pino.Logger,
@@ -155,10 +161,11 @@ async function waitForOAuthCode(
 }
 
 export async function getGoogleAccessToken(
-  config: BaseConfig,
+  config: GoogleAuthConfig,
   tokenStore: TokenStore,
+  tokenKey = "default",
 ): Promise<string> {
-  const stored = tokenStore.get("google");
+  const stored = tokenStore.get("google", tokenKey);
   if (!stored) {
     throw new Error("Google token not found. Run auth:google first.");
   }
@@ -181,6 +188,6 @@ export async function getGoogleAccessToken(
   });
 
   const token = toStoredToken(refreshed, stored.refreshToken);
-  tokenStore.save("google", token);
+  tokenStore.save("google", token, tokenKey);
   return token.accessToken;
 }

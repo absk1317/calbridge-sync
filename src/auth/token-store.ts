@@ -10,8 +10,8 @@ export class TokenStore {
     private readonly logger: pino.Logger,
   ) {}
 
-  get(provider: Provider): OAuthToken | undefined {
-    const row = this.db.getToken(provider);
+  get(provider: Provider, tokenKey = "default"): OAuthToken | undefined {
+    const row = this.db.getToken(provider, tokenKey);
     if (!row) {
       return undefined;
     }
@@ -24,14 +24,15 @@ export class TokenStore {
         scope: row.scopes ?? undefined,
       };
     } catch (error) {
-      this.logger.error({ provider, err: error }, "Failed to decrypt token from storage");
+      this.logger.error({ provider, tokenKey, err: error }, "Failed to decrypt token from storage");
       throw new Error(`Unable to decrypt stored ${provider} token. Check TOKEN_ENCRYPTION_KEY.`);
     }
   }
 
-  save(provider: Provider, token: OAuthToken) {
+  save(provider: Provider, token: OAuthToken, tokenKey = "default") {
     this.db.upsertToken({
       provider,
+      token_key: tokenKey,
       access_token: encryptText(token.accessToken, this.encryptionKey),
       refresh_token: encryptText(token.refreshToken, this.encryptionKey),
       expiry_ts: token.expiresAt,

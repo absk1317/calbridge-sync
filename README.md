@@ -1,87 +1,129 @@
 # Outlook -> Google Calendar Sync Daemon
 
-A local Node.js daemon that mirrors Outlook (Microsoft 365) events into a dedicated Google Calendar.
+A local Node.js daemon that mirrors Outlook calendar sources into Google Calendar.
 
-## Behavior (v1)
+## What it supports
 
-- One-way sync: Outlook -> Google.
-- Poll interval: every 5 minutes by default.
-- Sync window: past 7 days + next 15 days.
-- Recurring meetings are mirrored by syncing calendar-view instances (including exceptions/cancellations in window).
-- Outlook is source of truth: mirrored Google events are overwritten on each sync.
-- If Outlook events are canceled/deleted/out of window, mirrored Google events are deleted.
-- Two source modes are supported:
-  - `SOURCE_MODE=microsoft` (Graph API via OAuth)
-  - `SOURCE_MODE=ics` (published Outlook ICS feed, no Microsoft OAuth)
+- One-way sync into Google Calendar.
+- Many-to-1 architecture: multiple source subscriptions can sync into one target Google calendar.
+- Source modes per subscription:
+  - `microsoft` (Microsoft Graph API via OAuth)
+  - `ics` (published Outlook ICS feed, no Microsoft OAuth)
+- Poll interval configurable (default 5 minutes).
+- Sync window configurable (default past 7 days + next 15 days).
+- Recurring events, updates, and deletes/cancellations are reconciled in-window.
 
 ## Prerequisites
 
 - Node.js 20+
-- A Google OAuth client (Desktop app or Web app with loopback redirect URI).
-- For `SOURCE_MODE=microsoft`: a Microsoft app registration (public client) for device-code OAuth.
-- For `SOURCE_MODE=ics`: a published Outlook calendar ICS URL.
+- Google OAuth client credentials
+- For Microsoft source subscriptions: Azure app registration with delegated `Calendars.Read`
+- For ICS source subscriptions: published Outlook ICS URL(s)
 
-## Microsoft Azure App Setup
+## Google OAuth setup
 
-1. Go to Azure Portal -> App registrations -> New registration.
-2. Create a public client app.
-3. Enable **Allow public client flows**.
-4. Add delegated Microsoft Graph permission: `Calendars.Read`.
-5. Copy the Application (client) ID to `MICROSOFT_CLIENT_ID`.
-6. Set `MICROSOFT_TENANT_ID` (`common` works for many tenants; use your tenant ID if required by policy).
-
-## Outlook ICS Feed Setup (No Microsoft OAuth)
-
-1. In Outlook on the web, open calendar publishing/sharing settings.
-2. Publish the calendar with an ICS link.
-3. Copy the secret ICS URL into `OUTLOOK_ICS_URL`.
-4. Set `SOURCE_MODE=ics`.
-
-Notes:
-- In `ics` mode you do not run `auth:microsoft`.
-- Data freshness and recurrence fidelity depend on what your published feed contains.
-
-## Google OAuth App Setup
-
-1. Go to Google Cloud Console -> APIs & Services -> Credentials.
-2. Create OAuth Client ID.
-3. Add redirect URI:
+1. In Google Cloud Console, create OAuth Client ID.
+2. Add redirect URI:
    - `http://127.0.0.1:53682/oauth2callback`
-   - If you change `GOOGLE_OAUTH_REDIRECT_PORT`, update URI accordingly.
-4. Copy `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
-5. Create or choose a dedicated target Google calendar and copy its calendar ID to `GOOGLE_TARGET_CALENDAR_ID`.
+3. Copy `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
+
+## Microsoft app setup (for `microsoft` subscriptions)
+
+1. Azure Portal -> App registrations -> New registration.
+2. Enable **Allow public client flows**.
+3. Add delegated Microsoft Graph permission: `Calendars.Read`.
+4. Grant admin consent if your tenant policy requires it.
+5. Note client ID and tenant ID.
 
 ## Install
 
 ```bash
 npm install
 cp .env.example .env
-# edit .env with your values
+cp subscriptions.example.json subscriptions.json
+# edit both .env and subscriptions.json
 ```
 
-Set `TOKEN_ENCRYPTION_KEY` to a strong secret (at least 16 chars). You can generate a random key using `openssl rand -base64 48`.
+Set `TOKEN_ENCRYPTION_KEY` to a strong secret (at least 16 chars).
+Example:
+
+```bash
+openssl rand -base64 48
+```
+
+## Configuration
+
+### 1) `.env` (global settings)
+
+Key fields:
+- `SUBSCRIPTIONS_FILE=./subscriptions.json`
+- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+- `GOOGLE_TARGET_CALENDAR_ID` (default target calendar fallback)
+- `TOKEN_ENCRYPTION_KEY`
+- `SYNC_INTERVAL_SECONDS`, `SYNC_LOOKBACK_DAYS`, `SYNC_LOOKAHEAD_DAYS`
+- `SQLITE_PATH`
+
+You can still run legacy single-subscription mode (without `subscriptions.json`) via:
+- `SOURCE_MODE`
+- `OUTLOOK_ICS_URL`
+- `MICROSOFT_CLIENT_ID`, `MICROSOFT_TENANT_ID`
+
+### 2) `subscriptions.json` (many-to-1 source definitions)
+
+Use `subscriptions.example.json` as a template.
+
+```json
+{
+  "subscriptions": [
+    {
+      "id": "work-ics",
+      "enabled": true,
+      "sourceMode": "ics",
+      "outlookIcsUrl": "https://outlook.office.com/.../calendar.ics",
+      "googleTargetCalendarId": "your_target_calendar_id@group.calendar.google.com"
+    },
+    {
+      "id": "work-microsoft",
+      "enabled": true,
+      "sourceMode": "microsoft",
+      "microsoftClientId": "your-client-id",
+      "microsoftTenantId": "your-tenant-id",
+      "googleTargetCalendarId": "your_target_calendar_id@group.calendar.google.com"
+    }
+  ]
+}
+```
+
+Notes:
+- `id` must be unique.
+- `enabled` controls whether a subscription is active.
+- `googleTargetCalendarId` can be omitted when `GOOGLE_TARGET_CALENDAR_ID` is set in `.env`.
 
 ## Authenticate
+
+Google (once per Google account):
 
 ```bash
 npm run dev -- auth:google
 ```
 
-For Microsoft Graph mode only:
+Microsoft (run once per Microsoft subscription id):
 
 ```bash
-npm run dev -- auth:microsoft
+npm run dev -- auth:microsoft --subscription work-microsoft
 ```
 
-## Run Commands
+If only one Microsoft subscription exists, `--subscription` can be omitted.
 
-One sync cycle:
+## Run
+
+One batch cycle across all enabled subscriptions:
 
 ```bash
 npm run dev -- once
 ```
 
-Health check:
+Health checks (Google + every enabled subscription source):
 
 ```bash
 npm run dev -- health
@@ -93,56 +135,43 @@ Long-running daemon:
 npm run dev -- start
 ```
 
-## Cron Setup (macOS and Linux)
-
-Use cron if you want periodic one-shot runs instead of a long-lived process.
-
-### Recommended: interactive setup script
-
-1. Build first:
+Build and run compiled output:
 
 ```bash
 npm run build
+npm run once
+npm run start
 ```
 
-2. Run the setup script:
+## Cron setup (macOS and Linux)
+
+Use cron for periodic one-shot runs.
+
+### Recommended: interactive script
 
 ```bash
+npm run build
 npm run cron-setup
 ```
 
-The script asks for:
+The script prompts for:
 - repository directory
 - node binary path
-- polling interval in minutes (1-59)
+- polling interval (minutes)
 - log file path
 
-It then installs or updates a managed cron block in your user crontab.
-Re-running `npm run cron-setup` replaces the previous managed block safely.
+It installs/updates a managed crontab block safely.
 
-### Manual setup (alternative)
-
-```bash
-mkdir -p logs
-which node
-crontab -e
-```
-
-Add a line like:
+### Manual cron entry
 
 ```cron
 */5 * * * * cd /absolute/path/to/outlook-google-calendar-sync && /absolute/path/to/node dist/src/cli.js once >> /absolute/path/to/outlook-google-calendar-sync/logs/cron-sync.log 2>&1
 ```
 
-Notes:
-- Use absolute paths for both repo directory and `node`.
-- Cron does not load your shell profile, so `nvm` paths are often missing unless you use absolute paths.
-- Cron runs only while the machine is on (and not asleep).
-- If you change TypeScript source, rerun `npm run build` before cron uses new code.
-- Verify installed entries with `crontab -l`.
+## Storage and state
 
-## Notes
-
-- Tokens and sync state are stored in SQLite at `SQLITE_PATH`.
-- OAuth tokens are encrypted before being written to SQLite.
-- This app only manages events it created (tracked in local mapping DB).
+- SQLite stores:
+  - OAuth tokens (encrypted)
+  - event mappings (subscription-scoped)
+  - sync state (subscription-scoped)
+- Existing single-subscription DB data is migrated automatically to subscription id `default`.

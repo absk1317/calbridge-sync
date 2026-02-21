@@ -92,7 +92,7 @@ function buildReminder(reminderMinutesBeforeStart: number | null) {
   };
 }
 
-export function toGoogleEventPayload(source: SourceEvent): GoogleEventInput {
+export function toGoogleEventPayload(source: SourceEvent, subscriptionId: string): GoogleEventInput {
   return {
     summary: source.title,
     description: source.description,
@@ -104,6 +104,7 @@ export function toGoogleEventPayload(source: SourceEvent): GoogleEventInput {
       private: {
         app: APP_MARKER,
         source: "outlook",
+        subscription_id: subscriptionId,
         outlook_event_id: source.id,
       },
     },

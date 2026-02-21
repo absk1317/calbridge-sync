@@ -1,10 +1,14 @@
 import type pino from "pino";
-import type { BaseConfig } from "../config.js";
 import { HttpError, requestJson, toFormBody, wait } from "../http.js";
 import type { OAuthToken } from "../types.js";
 import type { TokenStore } from "./token-store.js";
 
 const MICROSOFT_SCOPES = ["offline_access", "https://graph.microsoft.com/Calendars.Read"];
+
+export interface MicrosoftAuthConfig {
+  microsoftClientId: string;
+  microsoftTenantId: string;
+}
 
 interface DeviceCodeResponse {
   user_code: string;
@@ -39,21 +43,12 @@ function formatErrorBody(body: unknown): string {
   }
 }
 
-function tokenEndpoint(config: BaseConfig): string {
+function tokenEndpoint(config: MicrosoftAuthConfig): string {
   return `https://login.microsoftonline.com/${config.microsoftTenantId}/oauth2/v2.0/token`;
 }
 
-function deviceCodeEndpoint(config: BaseConfig): string {
+function deviceCodeEndpoint(config: MicrosoftAuthConfig): string {
   return `https://login.microsoftonline.com/${config.microsoftTenantId}/oauth2/v2.0/devicecode`;
-}
-
-function requireMicrosoftClientId(config: BaseConfig): string {
-  if (!config.microsoftClientId) {
-    throw new Error(
-      "MICROSOFT_CLIENT_ID is required. Set it in .env before running auth:microsoft or SOURCE_MODE=microsoft sync.",
-    );
-  }
-  return config.microsoftClientId;
 }
 
 function toStoredToken(response: OAuthTokenResponse, fallbackRefreshToken?: string): OAuthToken {
@@ -72,11 +67,11 @@ function toStoredToken(response: OAuthTokenResponse, fallbackRefreshToken?: stri
 }
 
 export async function authenticateMicrosoftDeviceCode(
-  config: BaseConfig,
+  config: MicrosoftAuthConfig,
   tokenStore: TokenStore,
   logger: pino.Logger,
+  tokenKey = "default",
 ): Promise<void> {
-  const microsoftClientId = requireMicrosoftClientId(config);
   const scope = MICROSOFT_SCOPES.join(" ");
 
   let deviceCode: DeviceCodeResponse;
@@ -87,7 +82,7 @@ export async function authenticateMicrosoftDeviceCode(
         "Content-Type": "application/x-www-form-urlencoded",
       },
       body: toFormBody({
-        client_id: microsoftClientId,
+        client_id: config.microsoftClientId,
         scope,
       }),
     });
@@ -104,7 +99,6 @@ export async function authenticateMicrosoftDeviceCode(
       payload.error_description ? `AAD description: ${payload.error_description}` : undefined,
       "",
       "Checklist:",
-      "- Set MICROSOFT_TENANT_ID to your tenant ID (not 'common') for a single-tenant app.",
       "- Azure Portal -> App registration -> Authentication -> Allow public client flows = Yes.",
       "- Azure Portal -> API permissions -> Microsoft Graph delegated permission Calendars.Read.",
       "- Grant admin consent if your tenant requires it.",
@@ -120,6 +114,7 @@ export async function authenticateMicrosoftDeviceCode(
   console.log(deviceCode.message);
   logger.info(
     {
+      tokenKey,
       verificationUri: deviceCode.verification_uri,
       userCode: deviceCode.user_code,
       expiresIn: deviceCode.expires_in,
@@ -139,13 +134,13 @@ export async function authenticateMicrosoftDeviceCode(
         },
         body: toFormBody({
           grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-          client_id: microsoftClientId,
+          client_id: config.microsoftClientId,
           device_code: deviceCode.device_code,
         }),
       });
 
-      tokenStore.save("microsoft", toStoredToken(tokenResponse));
-      logger.info("Microsoft authentication completed");
+      tokenStore.save("microsoft", toStoredToken(tokenResponse), tokenKey);
+      logger.info({ tokenKey }, "Microsoft authentication completed");
       return;
     } catch (error) {
       if (!(error instanceof HttpError) || error.status !== 400) {
@@ -177,13 +172,13 @@ export async function authenticateMicrosoftDeviceCode(
 }
 
 export async function getMicrosoftAccessToken(
-  config: BaseConfig,
+  config: MicrosoftAuthConfig,
   tokenStore: TokenStore,
+  tokenKey = "default",
 ): Promise<string> {
-  const microsoftClientId = requireMicrosoftClientId(config);
-  const stored = tokenStore.get("microsoft");
+  const stored = tokenStore.get("microsoft", tokenKey);
   if (!stored) {
-    throw new Error("Microsoft token not found. Run auth:microsoft first.");
+    throw new Error(`Microsoft token not found for '${tokenKey}'. Run auth:microsoft --subscription ${tokenKey} first.`);
   }
 
   if (stored.expiresAt > Date.now() + 30_000) {
@@ -197,13 +192,13 @@ export async function getMicrosoftAccessToken(
     },
     body: toFormBody({
       grant_type: "refresh_token",
-      client_id: microsoftClientId,
+      client_id: config.microsoftClientId,
       refresh_token: stored.refreshToken,
       scope: MICROSOFT_SCOPES.join(" "),
     }),
   });
 
   const token = toStoredToken(refreshed, stored.refreshToken);
-  tokenStore.save("microsoft", token);
+  tokenStore.save("microsoft", token, tokenKey);
   return token.accessToken;
 }

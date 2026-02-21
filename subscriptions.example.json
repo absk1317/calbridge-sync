@@ -1,0 +1,19 @@
+{
+  "subscriptions": [
+    {
+      "id": "work-ics",
+      "enabled": true,
+      "sourceMode": "ics",
+      "outlookIcsUrl": "https://outlook.office.com/owa/calendar/.../calendar.ics",
+      "googleTargetCalendarId": "your_target_calendar_id@group.calendar.google.com"
+    },
+    {
+      "id": "work-microsoft",
+      "enabled": false,
+      "sourceMode": "microsoft",
+      "microsoftClientId": "your-azure-app-client-id",
+      "microsoftTenantId": "common",
+      "googleTargetCalendarId": "your_target_calendar_id@group.calendar.google.com"
+    }
+  ]
+}

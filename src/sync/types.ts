@@ -31,6 +31,9 @@ export interface SyncMetrics {
 }
 
 export interface SyncCycleResult {
+  subscriptionId: string;
+  sourceMode: "microsoft" | "ics";
+  targetCalendarId: string;
   windowStartIso: string;
   windowEndIso: string;
   metrics: SyncMetrics;

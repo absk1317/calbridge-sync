@@ -3,13 +3,22 @@
 import { Command } from "commander";
 import type pino from "pino";
 import { authenticateGoogleOAuth, getGoogleAccessToken } from "./auth/google.js";
-import { authenticateMicrosoftDeviceCode, getMicrosoftAccessToken } from "./auth/microsoft.js";
+import {
+  authenticateMicrosoftDeviceCode,
+  getMicrosoftAccessToken,
+  type MicrosoftAuthConfig,
+} from "./auth/microsoft.js";
 import { TokenStore } from "./auth/token-store.js";
 import { GoogleCalendarClient } from "./clients/google-calendar.js";
 import { IcsFeedClient } from "./clients/ics-feed.js";
 import { MicrosoftGraphClient } from "./clients/microsoft-graph.js";
-import type { AppConfig, BaseConfig } from "./config.js";
-import { loadAppConfig, loadBaseConfig } from "./config.js";
+import {
+  loadBaseConfig,
+  loadRuntimeConfig,
+  type BaseConfig,
+  type RuntimeConfig,
+  type SubscriptionConfig,
+} from "./config.js";
 import { DbClient } from "./db.js";
 import { HttpError } from "./http.js";
 import { createLogger } from "./logger.js";
@@ -18,6 +27,8 @@ import { MicrosoftSourceClient } from "./sync/microsoft-source-client.js";
 import type { SourceClient } from "./sync/source-client.js";
 import { SyncService } from "./sync/service.js";
 
+const GOOGLE_TOKEN_KEY = "default";
+
 interface BaseRuntime {
   config: BaseConfig;
   db: DbClient;
@@ -25,14 +36,38 @@ interface BaseRuntime {
   tokenStore: TokenStore;
 }
 
-interface SyncRuntime {
-  config: AppConfig;
+interface SubscriptionRuntime {
+  subscription: SubscriptionConfig;
+  sourceClient: SourceClient;
+  syncService: SyncService;
+}
+
+interface Runtime {
+  config: RuntimeConfig;
   db: DbClient;
   logger: pino.Logger;
   tokenStore: TokenStore;
-  sourceClient: SourceClient;
   googleClient: GoogleCalendarClient;
-  syncService: SyncService;
+  subscriptions: SubscriptionRuntime[];
+}
+
+function toGoogleAuthConfig(config: BaseConfig) {
+  return {
+    googleClientId: config.googleClientId,
+    googleClientSecret: config.googleClientSecret,
+    googleOAuthRedirectPort: config.googleOAuthRedirectPort,
+  };
+}
+
+function toMicrosoftAuthConfig(subscription: SubscriptionConfig): MicrosoftAuthConfig {
+  if (!subscription.microsoftClientId || !subscription.microsoftTenantId) {
+    throw new Error(`Subscription '${subscription.id}' is missing Microsoft auth configuration.`);
+  }
+
+  return {
+    microsoftClientId: subscription.microsoftClientId,
+    microsoftTenantId: subscription.microsoftTenantId,
+  };
 }
 
 async function withBaseRuntime<T>(fn: (runtime: BaseRuntime) => Promise<T>): Promise<T> {
@@ -48,29 +83,48 @@ async function withBaseRuntime<T>(fn: (runtime: BaseRuntime) => Promise<T>): Pro
   }
 }
 
-async function withSyncRuntime<T>(fn: (runtime: SyncRuntime) => Promise<T>): Promise<T> {
-  const config = loadAppConfig();
+async function withRuntime<T>(fn: (runtime: Runtime) => Promise<T>): Promise<T> {
+  const config = loadRuntimeConfig();
   const logger = createLogger(config.logLevel);
   const db = new DbClient(config.sqlitePath);
   const tokenStore = new TokenStore(db, config.tokenEncryptionKey, logger);
 
-  const googleClient = new GoogleCalendarClient(() => getGoogleAccessToken(config, tokenStore), logger);
+  const googleClient = new GoogleCalendarClient(
+    () => getGoogleAccessToken(toGoogleAuthConfig(config), tokenStore, GOOGLE_TOKEN_KEY),
+    logger,
+  );
 
-  let sourceClient: SourceClient;
-  if (config.sourceMode === "microsoft") {
-    const graphClient = new MicrosoftGraphClient(
-      () => getMicrosoftAccessToken(config, tokenStore),
-      logger,
-    );
-    sourceClient = new MicrosoftSourceClient(graphClient);
-  } else {
-    if (!config.outlookIcsUrl) {
-      throw new Error("OUTLOOK_ICS_URL is required when SOURCE_MODE=ics");
-    }
-    sourceClient = new IcsSourceClient(new IcsFeedClient(config.outlookIcsUrl, logger));
-  }
+  const subscriptions: SubscriptionRuntime[] = config.subscriptions
+    .filter((subscription) => subscription.enabled)
+    .map((subscription) => {
+      let sourceClient: SourceClient;
 
-  const syncService = new SyncService(config, db, sourceClient, googleClient, logger);
+      if (subscription.sourceMode === "microsoft") {
+        const graphClient = new MicrosoftGraphClient(
+          () =>
+            getMicrosoftAccessToken(
+              toMicrosoftAuthConfig(subscription),
+              tokenStore,
+              subscription.id,
+            ),
+          logger,
+        );
+        sourceClient = new MicrosoftSourceClient(graphClient);
+      } else {
+        if (!subscription.outlookIcsUrl) {
+          throw new Error(`Subscription '${subscription.id}' missing OUTLOOK_ICS_URL.`);
+        }
+        sourceClient = new IcsSourceClient(new IcsFeedClient(subscription.outlookIcsUrl, logger));
+      }
+
+      const syncService = new SyncService(config, subscription, db, sourceClient, googleClient, logger);
+
+      return {
+        subscription,
+        sourceClient,
+        syncService,
+      };
+    });
 
   try {
     return await fn({
@@ -78,24 +132,90 @@ async function withSyncRuntime<T>(fn: (runtime: SyncRuntime) => Promise<T>): Pro
       db,
       logger,
       tokenStore,
-      sourceClient,
       googleClient,
-      syncService,
+      subscriptions,
     });
   } finally {
     db.close();
   }
 }
 
+async function runOnceForAllSubscriptions(runtime: Runtime) {
+  const successes: Array<unknown> = [];
+  const failures: Array<{ subscriptionId: string; sourceMode: string; error: string }> = [];
+
+  for (const subscriptionRuntime of runtime.subscriptions) {
+    const { subscription, syncService } = subscriptionRuntime;
+    try {
+      const result = await syncService.runCycle();
+      successes.push(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push({
+        subscriptionId: subscription.id,
+        sourceMode: subscription.sourceMode,
+        error: message,
+      });
+    }
+  }
+
+  return {
+    ranAt: new Date().toISOString(),
+    subscriptionCount: runtime.subscriptions.length,
+    successCount: successes.length,
+    failureCount: failures.length,
+    successes,
+    failures,
+  };
+}
+
+function chooseMicrosoftSubscription(
+  subscriptions: SubscriptionConfig[],
+  requestedId: string | undefined,
+): SubscriptionConfig {
+  const microsoftSubs = subscriptions.filter((subscription) => subscription.sourceMode === "microsoft");
+
+  if (microsoftSubs.length === 0) {
+    throw new Error("No Microsoft subscriptions are configured.");
+  }
+
+  if (requestedId) {
+    const match = microsoftSubs.find((subscription) => subscription.id === requestedId);
+    if (!match) {
+      throw new Error(
+        `Microsoft subscription '${requestedId}' not found. Available: ${microsoftSubs.map((s) => s.id).join(", ")}`,
+      );
+    }
+    return match;
+  }
+
+  if (microsoftSubs.length === 1) {
+    return microsoftSubs[0];
+  }
+
+  throw new Error(
+    `Multiple Microsoft subscriptions found (${microsoftSubs
+      .map((s) => s.id)
+      .join(", ")}). Use --subscription <id>.`,
+  );
+}
+
 const program = new Command();
-program.name("sync-daemon").description("Outlook to Google calendar sync daemon").version("0.1.0");
+program.name("sync-daemon").description("Outlook to Google calendar sync daemon").version("0.2.0");
 
 program
   .command("auth:microsoft")
   .description("Authenticate Microsoft account via device code flow")
-  .action(async () => {
-    await withBaseRuntime(async ({ config, tokenStore, logger }) => {
-      await authenticateMicrosoftDeviceCode(config, tokenStore, logger);
+  .option("-s, --subscription <id>", "subscription id (required when multiple Microsoft subscriptions exist)")
+  .action(async (options: { subscription?: string }) => {
+    await withRuntime(async ({ config, tokenStore, logger }) => {
+      const subscription = chooseMicrosoftSubscription(config.subscriptions, options.subscription);
+      await authenticateMicrosoftDeviceCode(
+        toMicrosoftAuthConfig(subscription),
+        tokenStore,
+        logger,
+        subscription.id,
+      );
     });
   });
 
@@ -104,17 +224,21 @@ program
   .description("Authenticate Google account via OAuth redirect")
   .action(async () => {
     await withBaseRuntime(async ({ config, tokenStore, logger }) => {
-      await authenticateGoogleOAuth(config, tokenStore, logger);
+      await authenticateGoogleOAuth(toGoogleAuthConfig(config), tokenStore, logger, GOOGLE_TOKEN_KEY);
     });
   });
 
 program
   .command("once")
-  .description("Run exactly one sync cycle")
+  .description("Run exactly one sync cycle for all enabled subscriptions")
   .action(async () => {
-    await withSyncRuntime(async ({ syncService }) => {
-      const result = await syncService.runCycle();
-      console.log(JSON.stringify(result, null, 2));
+    await withRuntime(async (runtime) => {
+      const summary = await runOnceForAllSubscriptions(runtime);
+      console.log(JSON.stringify(summary, null, 2));
+
+      if (summary.failureCount > 0) {
+        throw new Error(`Sync failed for ${summary.failureCount} subscription(s).`);
+      }
     });
   });
 
@@ -122,56 +246,92 @@ program
   .command("health")
   .description("Verify database and API access with current credentials")
   .action(async () => {
-    await withSyncRuntime(async ({ config, sourceClient, googleClient, tokenStore }) => {
-      const status = {
-        database: "ok",
-        source: sourceClient.name,
-        microsoft: config.sourceMode === "microsoft" ? "ok" : "skipped",
-        google: "ok",
-        targetCalendarId: config.googleTargetCalendarId,
-      };
+    await withRuntime(async ({ subscriptions, googleClient, tokenStore }) => {
+      tokenStore.get("google", GOOGLE_TOKEN_KEY);
 
-      if (config.sourceMode === "microsoft") {
-        tokenStore.get("microsoft");
+      const uniqueTargetCalendars = new Set<string>();
+      for (const subscriptionRuntime of subscriptions) {
+        uniqueTargetCalendars.add(subscriptionRuntime.subscription.googleTargetCalendarId);
       }
-      tokenStore.get("google");
 
-      await sourceClient.healthCheck();
-      await googleClient.healthCheck(config.googleTargetCalendarId);
-      console.log(JSON.stringify(status, null, 2));
+      for (const calendarId of uniqueTargetCalendars) {
+        await googleClient.healthCheck(calendarId);
+      }
+
+      const subscriptionStatuses: Array<Record<string, unknown>> = [];
+      for (const subscriptionRuntime of subscriptions) {
+        const { subscription, sourceClient } = subscriptionRuntime;
+
+        if (subscription.sourceMode === "microsoft") {
+          tokenStore.get("microsoft", subscription.id);
+        }
+
+        await sourceClient.healthCheck();
+        subscriptionStatuses.push({
+          id: subscription.id,
+          enabled: subscription.enabled,
+          sourceMode: subscription.sourceMode,
+          sourceClient: sourceClient.name,
+          targetCalendarId: subscription.googleTargetCalendarId,
+          status: "ok",
+        });
+      }
+
+      console.log(
+        JSON.stringify(
+          {
+            database: "ok",
+            google: "ok",
+            subscriptions: subscriptionStatuses,
+          },
+          null,
+          2,
+        ),
+      );
     });
   });
 
 program
   .command("start")
-  .description("Start long-running daemon sync loop")
+  .description("Start long-running daemon sync loop for all enabled subscriptions")
   .action(async () => {
-    await withSyncRuntime(async ({ config, syncService, logger }) => {
+    await withRuntime(async (runtime) => {
       let shuttingDown = false;
       let cycleRunning = false;
 
-      const runCycle = async () => {
+      const runAllCycles = async () => {
         if (cycleRunning) {
-          logger.warn("Previous cycle still running; skipping this interval");
+          runtime.logger.warn("Previous cycle still running; skipping this interval");
           return;
         }
 
         cycleRunning = true;
         try {
-          const result = await syncService.runCycle();
-          logger.info({ metrics: result.metrics }, "Sync cycle completed");
+          const summary = await runOnceForAllSubscriptions(runtime);
+          runtime.logger.info(
+            {
+              subscriptionCount: summary.subscriptionCount,
+              successCount: summary.successCount,
+              failureCount: summary.failureCount,
+            },
+            "Sync cycle batch completed",
+          );
+
+          if (summary.failureCount > 0) {
+            runtime.logger.error({ failures: summary.failures }, "One or more subscriptions failed");
+          }
         } catch (error) {
-          logger.error({ err: error }, "Sync cycle failed");
+          runtime.logger.error({ err: error }, "Unexpected sync batch failure");
         } finally {
           cycleRunning = false;
         }
       };
 
-      await runCycle();
+      await runAllCycles();
 
       const timer = setInterval(() => {
-        void runCycle();
-      }, config.syncIntervalSeconds * 1000);
+        void runAllCycles();
+      }, runtime.config.syncIntervalSeconds * 1000);
 
       await new Promise<void>((resolve) => {
         const onSignal = () => {
@@ -180,7 +340,7 @@ program
           }
           shuttingDown = true;
           clearInterval(timer);
-          logger.info("Shutdown signal received");
+          runtime.logger.info("Shutdown signal received");
 
           const waitForCycle = () => {
             if (!cycleRunning) {
@@ -220,7 +380,7 @@ program.parseAsync(process.argv).catch((error) => {
     process.env.OUTLOOK_ICS_URL
   ) {
     console.error(
-      "Hint: OUTLOOK_ICS_URL is set. If you want to use ICS mode, set SOURCE_MODE=ics in .env and rerun.",
+      "Hint: OUTLOOK_ICS_URL is set. Configure subscription sourceMode=ics if this source should avoid Microsoft auth.",
     );
   }
 
